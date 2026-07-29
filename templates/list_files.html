@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>File Management</title>
+</head>
+<body>
+    <h1>Delete Unnecessary Files</h1>
+    <form action="{{ url_for('delete') }}" method="POST">
+
+        <h2>Images</h2>
+        <ul>
+        {% for img in image_files %}
+            <li>
+                <label>
+                    <input type="checkbox" name="images" value="{{ img }}">
+                    <!-- 画像プレビュー -->
+                    <img src="{{ url_for('serve_image', filename=img) }}" 
+                         width="100" alt="preview">
+                    <!-- ファイル名も表示 -->
+                    {{ img }}
+                </label>
+            </li>
+        {% endfor %}
+        </ul>
+
+        <h2>Records (CSV etc.)</h2>
+        <ul>
+        {% for rec in record_files %}
+            <li>
+                <label>
+                    <input type="checkbox" name="records" value="{{ rec }}">
+                    {{ rec }}
+                </label>
+            </li>
+        {% endfor %}
+        </ul>
+
+        <button type="submit">Delete Selected Files</button>
+    </form>
+
+    <hr>
+
+    <h2>Delete Specific Rows from CSV (example)</h2>
+    <form action="{{ url_for('delete_rows') }}" method="POST">
+        <label for="csv_file">CSV file name:</label>
+        <input type="text" id="csv_file" name="csv_file" placeholder="e.g. sample.csv">
+        <br>
+
+        <label for="rows">Rows to delete (index):</label>
+        <input type="text" id="rows" name="rows" placeholder="0,1,2">
+        <br>
+
+        <button type="submit">Delete Rows</button>
+    </form>
+</body>
+</html>

@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Choose CSV</title>
+</head>
+<body>
+    <!-- <h1> は削除 -->
+    <form method="POST">
+        <!-- 「Choose CSV」をボタンに変更し、選択時にPOSTする形 -->
+        <button type="submit" style="margin-right:10px;">Choose CSV</button>
+        <!-- 選択中のCSVファイル名をボタンの右側に表示 -->
+        <span id="selectedFileName" style="font-weight:bold;"></span>
+
+        <!-- ドロップダウン -->
+        <select name="selected_csv" id="csv-select" 
+            onchange="document.getElementById('selectedFileName').textContent = this.value;">
+            {% for csv_file in csv_files %}
+            <option value="{{ csv_file }}">{{ csv_file }}</option>
+            {% endfor %}
+        </select>
+    </form>
+</body>
+</html>

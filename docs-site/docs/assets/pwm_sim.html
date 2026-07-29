@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ラジコン PWM制御 シミュレーター</title>
+  
+  <!-- Tailwind CSS (デザイン用) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- React本体 -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  
+  <!-- Babel (ブラウザ上でReactコードを変換するため) -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body style="margin:0;padding:4px;background:transparent;">
+
+  <!-- この中にシミュレーターが表示されます -->
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState } = React;
+
+    const RCPWMSimulator = () => {
+      const [steering, setSteering] = useState(0);
+      const [throttle, setThrottle] = useState(0);
+
+      const steerPulseMs = (1.5 + (steering / 100) * 0.5).toFixed(2);
+      const throttlePulseMs = (1.5 + (throttle / 100) * 0.5).toFixed(2);
+
+      const WaveformChart = ({ title, pulseWidth, color }) => {
+        const pw = parseFloat(pulseWidth);
+        const svgWidth = 360;
+        const svgHeight = 85;
+        const startX = 30;
+        const msToPx = 70;
+        const highY = 20;
+        const lowY = 60;
+        const pulseEndX = startX + pw * msToPx;
+        const breakStartX = startX + 3.2 * msToPx;
+        const breakEndX = breakStartX + 30;
+        const endX = svgWidth - 15;
+
+        const wavePath = `M ${startX} ${lowY} L ${startX} ${highY} L ${pulseEndX} ${highY} L ${pulseEndX} ${lowY} L ${breakStartX} ${lowY}`;
+
+        return (
+          <div className="bg-white p-1.5 rounded shadow-sm border border-slate-200 relative">
+            <div className="flex items-center justify-between mb-0.5">
+              <div className="text-[10px] font-bold text-slate-700">{title}</div>
+              <div className={`text-[10px] font-mono font-bold px-1 rounded bg-${color}-100 text-${color}-700`}>
+                {pulseWidth} ms
+              </div>
+            </div>
+            <svg viewBox={`0 0 ${svgWidth} ${svgHeight}`} className="w-full h-auto">
+              <line x1={startX} y1={lowY} x2={endX} y2={lowY} stroke="#cbd5e1" strokeWidth="2" />
+              <line x1={startX + 1*msToPx} y1={lowY} x2={startX + 1*msToPx} y2={lowY+5} stroke="#94a3b8" strokeWidth="2" />
+              <text x={startX + 1*msToPx} y={lowY+20} textAnchor="middle" className="text-[10px] fill-slate-500 font-mono">1.0ms</text>
+              <line x1={startX + 1.5*msToPx} y1={lowY} x2={startX + 1.5*msToPx} y2={lowY+5} stroke="#94a3b8" strokeWidth="2" />
+              <text x={startX + 1.5*msToPx} y={lowY+20} textAnchor="middle" className="text-[10px] fill-slate-500 font-mono">1.5ms</text>
+              <line x1={startX + 2*msToPx} y1={lowY} x2={startX + 2*msToPx} y2={lowY+5} stroke="#94a3b8" strokeWidth="2" />
+              <text x={startX + 2*msToPx} y={lowY+20} textAnchor="middle" className="text-[10px] fill-slate-500 font-mono">2.0ms</text>
+              <path d={wavePath} fill="none" stroke={`var(--tw-colors-${color}-500)`} strokeWidth="3" strokeLinejoin="round" />
+              <path d={`M ${breakStartX} ${lowY} L ${breakStartX+8} ${lowY-10} L ${breakStartX+15} ${lowY+10} L ${breakStartX+22} ${lowY-10} L ${breakStartX+30} ${lowY}`} fill="none" stroke="#cbd5e1" strokeWidth="2" strokeLinejoin="round" />
+              <path d={`M ${breakEndX} ${lowY} L ${endX} ${lowY} L ${endX} ${highY}`} fill="none" stroke={`var(--tw-colors-${color}-500)`} strokeWidth="3" strokeLinejoin="round" strokeDasharray="4 4" />
+              <text x={startX + 5} y={highY - 10} className="text-[10px] fill-slate-500">ON</text>
+              <text x={breakStartX + 15} y={lowY - 20} textAnchor="middle" className="text-[10px] fill-slate-500">約18ms OFF状態</text>
+              <line x1={endX} y1={lowY} x2={endX} y2={lowY+5} stroke="#94a3b8" strokeWidth="2" />
+              <text x={endX} y={lowY+20} textAnchor="middle" className="text-[10px] fill-slate-500 font-mono">20ms</text>
+              <rect x={startX} y={highY} width={pw * msToPx} height={lowY - highY} fill={`var(--tw-colors-${color}-200)`} opacity="0.4" />
+            </svg>
+          </div>
+        );
+      };
+
+      return (
+        <div className="w-full mx-auto font-sans text-slate-800" style={{display:'grid', gridTemplateColumns:'auto 1fr 1fr', gap:'6px'}}>
+            <div className="bg-slate-800 text-white p-2 rounded-lg border-2 border-slate-700 relative overflow-hidden" style={{width:'150px'}}>
+              <div className="absolute top-1 right-2 w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></div>
+              <h3 className="text-xs font-bold flex items-center gap-1 border-b border-slate-600 pb-1">
+                <span>🎮</span> 送信機
+              </h3>
+              <div className="text-[9px] text-slate-400 mb-1">操作値 -1.0 〜 1.0</div>
+              <div className="mb-2">
+                <div className="flex justify-between text-[10px] mb-0.5 text-slate-300">
+                  <span>左</span>
+                  <span className="font-bold text-blue-400">ステアリング</span>
+                  <span>右</span>
+                </div>
+                <input type="range" min="-100" max="100" value={steering} onChange={(e) => setSteering(Number(e.target.value))} className="w-full h-2 bg-slate-600 rounded-lg appearance-none cursor-pointer accent-blue-500" />
+                <div className="text-center text-[10px] text-slate-400 font-mono mt-0.5">
+                  {steering > 0 ? `+${steering}` : steering}% ({(steering / 100).toFixed(2)})
+                </div>
+                <div className="flex justify-center mt-0.5">
+                  <button onClick={() => setSteering(0)} className="text-[10px] bg-slate-700 hover:bg-slate-600 px-1.5 py-0 rounded border border-slate-500">Reset</button>
+                </div>
+              </div>
+              <div>
+                <div className="flex justify-between text-[10px] mb-0.5 text-slate-300">
+                  <span>後退</span>
+                  <span className="font-bold text-emerald-400">スロットル</span>
+                  <span>前進</span>
+                </div>
+                <input type="range" min="-100" max="100" value={throttle} onChange={(e) => setThrottle(Number(e.target.value))} className="w-full h-2 bg-slate-600 rounded-lg appearance-none cursor-pointer accent-emerald-500" />
+                <div className="text-center text-[10px] text-slate-400 font-mono mt-0.5">
+                  {throttle > 0 ? `+${throttle}` : throttle}% ({(throttle / 100).toFixed(2)})
+                </div>
+                <div className="flex justify-center mt-0.5">
+                  <button onClick={() => setThrottle(0)} className="text-[10px] bg-slate-700 hover:bg-slate-600 px-1.5 py-0 rounded border border-slate-500">Reset</button>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <div className="bg-slate-200 px-2 py-1 rounded-t border-b border-slate-300 flex items-center justify-between">
+                <h3 className="text-xs font-bold text-slate-700 flex items-center gap-1"><span>📡</span> 受信機</h3>
+                <span className="text-[10px] bg-slate-800 text-white px-1 py-0 rounded">2.4GHz</span>
+              </div>
+              <div className="text-[9px] text-slate-500 px-2">パルス幅 1.0〜2.0ms / 50-60Hz</div>
+              <WaveformChart title="CH1: ステアリング" pulseWidth={steerPulseMs} color="blue" />
+              <WaveformChart title="CH2: スロットル" pulseWidth={throttlePulseMs} color="emerald" />
+            </div>
+
+            <div className="bg-white p-1.5 rounded-lg shadow-sm border border-slate-200 flex flex-col items-center">
+              <h3 className="text-[10px] font-bold text-slate-800 flex items-center gap-1 w-full justify-center">
+                🏎️ 車体
+              </h3>
+              <div className="text-[9px] text-slate-400 mb-0.5">サーボ + ESC</div>
+              <div className="relative w-[110px] h-[130px] bg-slate-50 border border-dashed border-slate-300 rounded overflow-hidden flex items-center justify-center">
+                <div className="absolute inset-0 pointer-events-none"
+                     style={{
+                       opacity: 0.5,
+                       backgroundImage: 'linear-gradient(0deg, transparent 50%, #64748b 50%)',
+                       backgroundSize: '100% 40px',
+                       animation: throttle !== 0 ? `scroll ${throttle > 0 ? 100/throttle : 100/Math.abs(throttle)}s linear infinite ${throttle > 0 ? 'reverse' : 'normal'}` : 'none'
+                     }}>
+                </div>
+                {throttle > 0 && <div className="absolute top-1 flex flex-col items-center text-emerald-500 opacity-70 animate-bounce"><span className="text-lg">⬆️</span><span className="font-bold text-[10px]">前進</span></div>}
+                {throttle < 0 && <div className="absolute bottom-1 flex flex-col items-center text-rose-500 opacity-70 animate-bounce"><span className="font-bold text-[10px]">後退</span><span className="text-lg">⬇️</span></div>}
+
+                <svg viewBox="0 0 200 300" className="absolute z-10 w-full h-full drop-shadow-lg">
+                  <rect x="65" y="60" width="70" height="180" rx="10" fill="#3b82f6" stroke="#1e3a8a" strokeWidth="2" />
+                  <rect x="75" y="110" width="50" height="70" rx="5" fill="#1e293b" />
+                  <rect x="90" y="80" width="20" height="20" rx="2" fill="#ef4444" />
+                  <line x1="100" y1="80" x2="100" y2="65" stroke="#1e293b" strokeWidth="2" />
+                  <rect x="45" y="200" width="20" height="40" rx="3" fill="#0f172a" />
+                  <rect x="135" y="200" width="20" height="40" rx="3" fill="#0f172a" />
+                  <line x1="65" y1="220" x2="135" y2="220" stroke="#475569" strokeWidth="4" />
+                  <g transform={`rotate(${steering * 0.35}, 55, 90)`}><rect x="45" y="70" width="20" height="40" rx="3" fill="#0f172a" /></g>
+                  <g transform={`rotate(${steering * 0.35}, 145, 90)`}><rect x="135" y="70" width="20" height="40" rx="3" fill="#0f172a" /></g>
+                  <line x1="65" y1="90" x2="135" y2="90" stroke="#475569" strokeWidth="2" />
+                </svg>
+              </div>
+              <div className="mt-1 grid grid-cols-2 gap-1 w-full text-[10px]">
+                <div className="bg-blue-50 p-1 rounded border border-blue-200 text-center">
+                  <div className="text-slate-500">角度</div>
+                  <div className="font-bold text-blue-700">{Math.round(steering * 0.35)}°</div>
+                  <div className="text-slate-500 font-mono">{(steering / 100).toFixed(2)}</div>
+                </div>
+                <div className="bg-emerald-50 p-1 rounded border border-emerald-200 text-center">
+                  <div className="text-slate-500">出力</div>
+                  <div className={`font-bold ${throttle >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>{Math.abs(throttle)}%</div>
+                  <div className="text-slate-500 font-mono">{(throttle / 100).toFixed(2)}</div>
+                </div>
+              </div>
+            </div>
+
+          <style dangerouslySetInnerHTML={{__html: `
+            @keyframes scroll {
+              from { background-position: 0 0; }
+              to { background-position: 0 40px; }
+            }
+          `}} />
+        </div>
+      );
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<RCPWMSimulator />);
+  </script>
+</body>
+</html>

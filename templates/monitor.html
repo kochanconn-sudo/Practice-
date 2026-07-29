@@ -1,0 +1,1593 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Togikaidrive Monitor</title>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f4f4f9;
+            color: #333;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+        }
+        .main-wrapper {
+            display: flex;
+            flex-direction: column;
+            width: 100%;
+            height: 100vh;
+        }
+        header {
+            background-color: #3b5998;
+            color: white;
+            padding: 16px;
+            text-align: center;
+        }
+        h1 {
+            margin: 0;
+            font-size: 24px;
+        }
+        .container {
+            display: flex;
+            flex-wrap: nowrap;
+            padding: 8px;
+            flex: 7;
+            min-height: 0;
+            position: relative;
+        }
+        .camera-container {
+            flex: 7;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            background-color: #000;
+            border-radius: 8px;
+            overflow: hidden;
+            min-width: 200px;
+        }
+        #cameraFeed {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            border-radius: 8px;
+        }
+        #overlayCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+        .control-container {
+            flex: 3;
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 6px 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            overflow-y: auto;
+            min-width: 220px;
+        }
+        .form-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 3px 6px;
+        }
+        .form-grid-full {
+            grid-column: 1 / -1;
+        }
+        .control-container h2 {
+            font-size: 13px;
+            border-bottom: 2px solid #3b5998;
+            margin: 0 0 4px;
+            padding-bottom: 2px;
+        }
+        .buttons {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 4px;
+        }
+        button {
+            padding: 4px 8px;
+            font-size: 11px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.3s, color 0.3s;
+        }
+        #setConfigButton {
+            background-color: #f9c74f;
+            color: black;
+            width: 100%;
+            margin-top: 4px;
+            padding: 4px 8px;
+            font-size: 11px;
+        }
+        #setConfigButton:disabled {
+            background-color: #f4f4f9;
+            color: #999;
+            cursor: not-allowed;
+        }
+        button.active {
+            background-color: #3b5998;
+            color: white;
+        }
+        button.inactive {
+            background-color: #ddd;
+            color: #666;
+        }
+        .form-row {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            margin-bottom: 0;
+        }
+        .form-row label {
+            flex: 0 0 72px;
+            font-size: 10px;
+            margin: 0;
+            color: #555;
+            text-align: right;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .form-row input,
+        .form-row select {
+            flex: 1;
+            min-width: 0;
+        }
+        label {
+            font-size: 10px;
+            display: block;
+            margin-bottom: 1px;
+            color: #555;
+        }
+        input, select {
+            width: 100%;
+            padding: 2px 4px;
+            font-size: 11px;
+            border: 1px solid #ccc;
+            border-radius: 3px;
+        }
+        .realtime-data {
+            padding: 8px;
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            margin: 8px;
+            flex: 3 1 80px;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: stretch;
+            gap: 8px;
+            min-height: 80px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        .realtime-data-left {
+            flex: 1 1 0;
+            min-width: 100px;
+        }
+        .realtime-data-right {
+            flex: 1 1 0;
+        }
+        .realtime-data h2 {
+            margin: 0 0 8px;
+            font-size: 16px;
+            border-bottom: 2px solid #3b5998;
+            display: inline-block;
+            padding-bottom: 4px;
+        }
+        .realtime-data div {
+            margin-bottom: 4px;
+            font-size: 12px;
+        }
+        #ultrasonicChart {
+            margin-top: 5px;
+            height: 60px !important;
+        }
+        #configUpdateResult {
+            margin-top: 2px;
+            font-size: 10px;
+            color: green;
+        }
+        /* Resizer styles */
+        .resizer-horizontal {
+            width: 8px;
+            cursor: col-resize;
+            background-color: #ddd;
+            position: relative;
+            user-select: none;
+            transition: background-color 0.2s;
+        }
+        .resizer-horizontal:hover {
+            background-color: #3b5998;
+        }
+        .resizer-vertical {
+            height: 8px;
+            cursor: row-resize;
+            background-color: #ddd;
+            position: relative;
+            user-select: none;
+            transition: background-color 0.2s;
+        }
+        .resizer-vertical:hover {
+            background-color: #3b5998;
+        }
+    </style>
+</head>
+<body>
+    <div class="main-wrapper">
+        <div class="container">
+            <!-- カメラ映像 -->
+            <div class="camera-container">
+                <img id="cameraFeed" alt="Camera feed" style="display: none;">
+                <canvas id="overlayCanvas"></canvas> <!-- This canvas will hold the arrows -->
+            </div>
+
+            <!-- 水平リサイザー -->
+            <div class="resizer-horizontal" id="horizontalResizer"></div>
+
+            <!-- Control & Config -->
+            <div class="control-container">
+            <h2>Control & Config</h2>
+            <div class="buttons">
+                <button id="pauseButton" class="inactive" onclick="toggleDriveControl('pause')">Pause</button>
+                <button id="resumeButton" class="inactive" onclick="toggleDriveControl('resume')">Resume</button>
+            </div>
+            <form id="configForm">
+                <div class="form-grid">
+                    <div class="form-row form-grid-full">
+                        <label title="走行プラン">PLAN</label>
+                        <select name="PLAN" id="planSelect" onchange="updateModelOptions(this.value)"></select>
+                    </div>
+                    <div class="form-row form-grid-full">
+                        <label title="使用するAIモデルファイル">MODEL_NAME</label>
+                        <select id="modelSelect" name="MODEL_NAME"></select>
+                    </div>
+                    <div class="form-row form-grid-full">
+                        <label title="wall_follow時の壁沿い方向">HAND_SIDE</label>
+                        <select name="HAND_SIDE" id="handSideSelect">
+                            <option value="right">Right</option>
+                            <option value="left">Left</option>
+                        </select>
+                    </div>
+                    <div class="form-row">
+                        <label title="直進時のスロットル値 (0~1)">FWD_STRAIGHT</label>
+                        <input type="text" name="FORWARD_STRAIGHT">
+                    </div>
+                    <div class="form-row">
+                        <label title="カーブ時のスロットル値 (0~1)">FWD_CORNER</label>
+                        <input type="text" name="FORWARD_CORNER">
+                    </div>
+                    <div class="form-row">
+                        <label title="停止判定距離 (mm)">STOP_RANGE</label>
+                        <input type="text" name="STOP_RANGE">
+                    </div>
+                    <div class="form-row">
+                        <label title="後退判定距離 (mm)">BACKWARD_R</label>
+                        <input type="text" name="BACKWARD_RANGE">
+                    </div>
+                    <div class="form-row">
+                        <label title="障害物検知開始距離 (mm)">DETECTION_R</label>
+                        <input type="text" name="DETECTION_RANGE">
+                    </div>
+                    <div class="form-row">
+                        <label title="右左折判定基準距離 (mm)">RL_RANGE</label>
+                        <input type="text" name="RIGHT_LEFT_RANGE">
+                    </div>
+                    <div class="form-row">
+                        <label title="壁沿い走行の目標距離 (mm)">TARGET_R</label>
+                        <input type="text" name="TARGET_RANGE">
+                    </div>
+                    <div class="form-row">
+                        <label title="目標距離の許容誤差 (±mm)">TARGET_ADJ</label>
+                        <input type="text" name="TARGET_RANGE_ADJUSTMENT">
+                    </div>
+                    <div class="form-row">
+                        <label title="PID比例ゲイン">K_P</label>
+                        <input type="text" name="K_P">
+                    </div>
+                    <div class="form-row">
+                        <label title="PID積分ゲイン">K_I</label>
+                        <input type="text" name="K_I">
+                    </div>
+                    <div class="form-row">
+                        <label title="PID微分ゲイン">K_D</label>
+                        <input type="text" name="K_D">
+                    </div>
+                    <div class="form-row form-grid-full">
+                        <label title="2点壁角度アライメント補正の有効/無効">ALIGNMENT</label>
+                        <select name="WALL_FOLLOW_USE_ALIGNMENT" id="alignmentSelect">
+                            <option value="true">ON</option>
+                            <option value="false">OFF</option>
+                        </select>
+                    </div>
+                    <div class="form-row">
+                        <label title="壁角度補正ゲイン (rad→steering)">K_ANGLE</label>
+                        <input type="text" name="WALL_FOLLOW_K_ANGLE">
+                    </div>
+                </div>
+                <button id="setConfigButton" type="button" onclick="setConfig()" disabled>Set Config</button>
+            </form>
+            <div id="configUpdateResult"></div>
+        </div>
+    </div>
+
+    <!-- 垂直リサイザー -->
+    <div class="resizer-vertical" id="verticalResizer"></div>
+
+    <!-- Realtime Data -->
+    <div class="realtime-data">
+        <!-- 左側のデータ表示（2列） -->
+        <div class="realtime-data-left" style="display:flex; flex-direction:row; gap:12px;">
+            <div style="flex:1; min-width:0;">
+                <h2>Realtime Data</h2>
+                <div style="font-family:monospace;">Time: <span id="timestamp"></span></div>
+                <div style="font-family:monospace;">Records: <span id="record_count">0</span></div>
+                <div style="font-family:monospace;">FPS: <span id="fps_value">-</span></div>
+                <div style="font-family:monospace;">Mode: <span id="mode"></span></div>
+                <div style="font-family:monospace;">Steering: <span id="steering_value" style="display:inline-block; min-width:60px; text-align:right;"></span></div>
+                <div style="font-family:monospace;">Throttle: <span id="throttle_value" style="display:inline-block; min-width:60px; text-align:right;"></span></div>
+            </div>
+            <div style="flex:1; min-width:0; padding-top:28px;">
+                <div style="font-family:monospace;">Yaw Rate: <span id="rt_yaw_rate" style="display:inline-block; min-width:70px; text-align:right;">NA</span></div>
+                <div style="font-family:monospace;">Accel X:  <span id="rt_accel_x" style="display:inline-block; min-width:70px; text-align:right;">NA</span></div>
+                <div style="font-family:monospace;">Accel Y:  <span id="rt_accel_y" style="display:inline-block; min-width:70px; text-align:right;">NA</span></div>
+                <div style="font-family:monospace;">RPM:      <span id="rt_rpm" style="display:inline-block; min-width:70px; text-align:right;">NA</span></div>
+                <div style="font-family:monospace;">Flow:     <span id="rt_flow" style="display:inline-block; min-width:70px; text-align:right;">NA</span></div>
+            </div>
+        </div>
+
+        <!-- 中央のコントロール表示（横並び） -->
+        <div class="realtime-data-center" style="flex: 0 0 auto; display: flex; flex-direction: row; align-items: center; gap: 6px;">
+            <div style="text-align: center;">
+                <div style="font-size: 12px; font-weight: bold;">Steering</div>
+                <canvas id="steeringCanvas" width="100" height="100" style="border: 1px solid #ccc; border-radius: 50%;"></canvas>
+                <div id="steeringValueLabel" style="font-size: 12px; font-family: monospace; color: #333;">0.00</div>
+            </div>
+            <div style="text-align: center;">
+                <div style="font-size: 12px; font-weight: bold;">Throttle</div>
+                <canvas id="throttleCanvas" width="60" height="100" style="border: 1px solid #ccc; border-radius: 5px;"></canvas>
+                <div id="throttleValueLabel" style="font-size: 12px; font-family: monospace; color: #333;">0.00</div>
+            </div>
+            <div style="text-align: center;">
+                <div style="font-size: 12px; font-weight: bold;">IMU</div>
+                <canvas id="imuCanvas" width="100" height="100" style="border: 1px solid #ccc; border-radius: 50%;"></canvas>
+                <div id="imuValueLabel" style="font-size: 12px; font-family: monospace; color: #333; min-width:60px; text-align:center;">NA</div>
+            </div>
+            <div style="display: flex; flex-direction: column; justify-content: center; gap: 4px; font-family: monospace; font-size: 12px; color: #333; min-width: 50px;">
+                <div style="text-align: center;">
+                    <div style="font-weight: bold;">RPM</div>
+                    <div id="rpmValueLabel" style="color: #666;">NA</div>
+                </div>
+                <div style="text-align: center;">
+                    <div style="font-weight: bold;">Flow</div>
+                    <div id="flowValueLabel" style="color: #666;">NA</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 右側のセンサー可視化表示（2列レイアウト） -->
+        <div class="realtime-data-right" style="display:flex; flex-direction:row; gap:0; align-items:stretch; background:#000;">
+            <!-- 左列: センサー値 -->
+            <div id="sensorInfoColumn" style="flex:0 0 auto; min-width:90px; display:flex; flex-direction:column; font-size:10px; gap:2px; background:#000; padding:4px 0 4px 4px; color:#ccc; overflow:hidden;">
+                <div style="font-weight:bold; font-size:10px; color:#999; margin-bottom:1px;">Ranges</div>
+                <div id="sensorValuesPanel" style="font-family:monospace; font-size:11px; line-height:1.4; display:flex; flex-wrap:wrap; gap:0 8px;"></div>
+            </div>
+            <!-- 中列: センサー可視化キャンバス（1:1アスペクト比） -->
+            <div id="sensorCanvasWrap" style="flex:1; min-width:0; display:flex; align-items:center; justify-content:center; background:#000;">
+                <canvas id="sensorCanvas" width="200" height="200"></canvas>
+            </div>
+            <!-- Panスライダー（縦向き） -->
+            <div id="lidarPanColumn" style="display:none; flex:0 0 24px; background:#000; padding:2px 2px; color:#ccc; font-size:9px; align-items:center; justify-content:center; flex-direction:column; gap:0;">
+                <div style="white-space:nowrap; font-family:monospace; text-align:center; line-height:1.2;">Pan<br><span id="lidarPanLabel">75</span></div>
+                <input type="range" id="lidarPanSlider" min="0" max="100" value="75" orient="vertical" style="writing-mode:vertical-lr; direction:rtl; height:100%; min-height:40px; width:18px; flex:1;">
+            </div>
+            <!-- Zoomスライダー（縦向き） -->
+            <div id="lidarZoomColumn" style="display:none; flex:0 0 24px; background:#000; padding:2px 2px; color:#ccc; font-size:9px; align-items:center; justify-content:center; flex-direction:column; gap:0;">
+                <div style="white-space:nowrap; font-family:monospace; text-align:center; line-height:1.2;">Zoom<br><span id="lidarZoomLabel">85</span></div>
+                <input type="range" id="lidarZoomSlider" min="20" max="1000" value="85" orient="vertical" style="writing-mode:vertical-lr; direction:rtl; height:100%; min-height:40px; width:18px; flex:1;">
+            </div>
+        </div>
+    </div> <!-- end of main-wrapper -->
+
+    <script>
+        // Fetch models (Promiseを返す)
+        function fetchModels() {
+            return fetch('/get_models')
+                .then(res => {
+                    if (!res.ok) {
+                        throw new Error('Failed to fetch models');
+                    }
+                    return res.json();
+                })
+                .then(data => {
+                    // data.models を返す
+                    return data.models;
+                })
+                .catch(err => {
+                    console.error('Error fetching models:', err);
+                    throw err;
+                });
+        }
+
+        // Update MODEL_NAME options when PLAN changes
+        function updateModelOptions(plan) {
+            fetchModels()
+                .then(models => {
+                    const modelSelect = document.getElementById('modelSelect');
+                    modelSelect.innerHTML = ''; // Clear existing options
+
+                    // modelsが取れなかった場合のフォールバック
+                    if (!models || !Array.isArray(models)) {
+                        const noModelOption = document.createElement('option');
+                        noModelOption.value = '';
+                        noModelOption.textContent = 'No models available';
+                        modelSelect.appendChild(noModelOption);
+                        return;
+                    }
+
+                    // PLANに応じて絞り込み（ファイル名プレフィックスで判定）
+                    const planPrefixMap = {
+                        'nn': 'nn_',
+                        'donkeycar': 'donkeycar_',
+                        'resnet18': 'resnet18_',
+                        'mobilevit_xxs': 'mobilevit_xxs_',
+                        'edgenext_xx_small': 'edgenext_xx_small_',
+                        'gru': 'gru_',
+                        'tcn': 'tcn_',
+                        'causal_cnn': 'causal_cnn_',
+                    };
+                    const prefix = planPrefixMap[plan];
+                    const filteredModels = prefix
+                        ? models.filter(model => model.startsWith(prefix))
+                        : [];
+
+                    // Populate MODEL_NAME options
+                    const currentModel = document.querySelector('select[name="MODEL_NAME"]')?.dataset.current || '';
+                    if (filteredModels.length > 0) {
+                        filteredModels.forEach(model => {
+                            const option = document.createElement('option');
+                            option.value = model;
+                            option.textContent = model;
+                            if (model === currentModel) option.selected = true;
+                            modelSelect.appendChild(option);
+                        });
+                    } else {
+                        const noModelOption = document.createElement('option');
+                        noModelOption.value = '';
+                        noModelOption.textContent = 'No models available';
+                        modelSelect.appendChild(noModelOption);
+                    }
+                })
+                .catch(err => console.error('updateModelOptions error:', err));
+        }
+
+        // Handle PLAN changes and reload the system (現在未使用のようなので残す)
+        function handlePlanChange(plan) {
+            console.log('PLAN changed to:', plan);
+            reloadPlan(plan);
+        }
+
+        // Reload the system with the selected PLAN (現在未使用のようなので残す)
+        function reloadPlan(plan) {
+            fetch('/reload_system', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ plan: plan })
+            })
+                .then(res => {
+                    if (!res.ok) {
+                        throw new Error('Failed to reload system');
+                    }
+                    return res.json();
+                })
+                .then(data => {
+                    console.log('System reloaded:', data);
+                    alert('System reloaded with new plan: ' + plan);
+                })
+                .catch(err => console.error('Error reloading system:', err));
+        }
+
+        // WebSocket 接続とハンドリング
+        let websocket = null;
+        let reconnectInterval = null;
+        let isConnecting = false;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 5;
+
+        function connectWebSocket() {
+            if (isConnecting || (websocket && websocket.readyState === WebSocket.CONNECTING)) {
+                console.log('WebSocket connection already in progress');
+                return;
+            }
+
+            if (websocket && websocket.readyState === WebSocket.OPEN) {
+                console.log('WebSocket already connected');
+                return;
+            }
+
+            isConnecting = true;
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws`;
+
+            console.log(`Connecting to WebSocket: ${wsUrl}`);
+            websocket = new WebSocket(wsUrl);
+
+            websocket.onopen = function() {
+                console.log('WebSocket connected successfully');
+                isConnecting = false;
+                reconnectAttempts = 0;
+                if (reconnectInterval) {
+                    clearInterval(reconnectInterval);
+                    reconnectInterval = null;
+                }
+            };
+
+            websocket.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    handleWebSocketMessage(data);
+                } catch (error) {
+                    console.error('Error parsing WebSocket message:', error);
+                }
+            };
+
+            websocket.onclose = function(event) {
+                console.log(`WebSocket disconnected. Code: ${event.code}, Reason: ${event.reason}`);
+                websocket = null;
+                isConnecting = false;
+
+                // 自動再接続（最大試行回数まで）
+                if (reconnectAttempts < maxReconnectAttempts && !reconnectInterval) {
+                    reconnectAttempts++;
+                    console.log(`Attempting to reconnect... (${reconnectAttempts}/${maxReconnectAttempts})`);
+                    reconnectInterval = setTimeout(() => {
+                        reconnectInterval = null;
+                        connectWebSocket();
+                    }, 3000);
+                } else if (reconnectAttempts >= maxReconnectAttempts) {
+                    console.error('Max reconnection attempts reached. Please refresh the page.');
+                }
+            };
+
+            websocket.onerror = function(error) {
+                console.error('WebSocket error:', error);
+                isConnecting = false;
+            };
+        }
+
+        function handleWebSocketMessage(data) {
+            switch (data.type) {
+                case 'image':
+                    updateCameraImage(data.data);
+                    break;
+                case 'sensor_data':
+                    updateSensorData(data.data);
+                    break;
+                case 'control_response':
+                    console.log('Control response:', data);
+                    break;
+                case 'config_response':
+                    if (data.config) {
+                        handleGetConfigResponse(data);
+                    } else {
+                        handleConfigResponse(data);
+                    }
+                    break;
+                case 'error':
+                    console.error('WebSocket error:', data.message);
+                    break;
+            }
+        }
+
+        function updateCameraImage(base64Data) {
+            const img = document.getElementById('cameraFeed');
+            img.src = 'data:image/jpeg;base64,' + base64Data;
+            img.style.display = 'block';
+        }
+
+        function updateSensorData(data) {
+            // デバッグ出力（最初の10回のみ）
+            if (!updateSensorData.debugCount) updateSensorData.debugCount = 0;
+            if (updateSensorData.debugCount < 10) {
+                console.log(`[DEBUG ${updateSensorData.debugCount}] updateSensorData called:`, {
+                    steering: data.steering_value,
+                    throttle: data.throttle_value,
+                    ultrasonicKeys: data.ultrasonic_ranges ? Object.keys(data.ultrasonic_ranges) : 'null/undefined',
+                    ultrasonicValues: data.ultrasonic_ranges,
+                    rangesKeys: data.ranges ? Object.keys(data.ranges) : 'null/undefined',
+                    rangesValues: data.ranges
+                });
+                updateSensorData.debugCount++;
+            }
+
+            document.getElementById('mode').textContent = data.mode || 'N/A';
+            document.getElementById('steering_value').textContent = (data.steering_value !== undefined && data.steering_value !== null) ? Number(data.steering_value).toFixed(3) : 'N/A';
+            document.getElementById('throttle_value').textContent = (data.throttle_value !== undefined && data.throttle_value !== null) ? Number(data.throttle_value).toFixed(3) : 'N/A';
+            document.getElementById('timestamp').textContent = data.timestamp || 'N/A';
+            document.getElementById('record_count').textContent = (data.record_count !== undefined && data.record_count !== null) ? data.record_count : '0';
+            document.getElementById('fps_value').textContent = (data.fps !== undefined && data.fps !== null) ? data.fps : '-';
+
+            // ステアリングハンドルの更新
+            const steeringValue = (data.steering_value !== undefined && data.steering_value !== null) ? data.steering_value : 0;
+            drawSteeringWheel(steeringValue);
+            var stLabel = document.getElementById('steeringValueLabel');
+            if (stLabel) stLabel.textContent = Number(steeringValue).toFixed(2);
+
+            // スロットルゲージの更新
+            const throttleValue = (data.throttle_value !== undefined && data.throttle_value !== null) ? data.throttle_value : 0;
+            drawThrottleGauge(throttleValue);
+            var thLabel = document.getElementById('throttleValueLabel');
+            if (thLabel) thLabel.textContent = Number(throttleValue).toFixed(2);
+
+            // IMU/RPM/OpticalFlow の更新
+            var imuYawRate = (data.imu_yaw_rate !== undefined && data.imu_yaw_rate !== null) ? data.imu_yaw_rate : null;
+            var imuAccel = (data.imu_accel !== undefined && data.imu_accel !== null) ? data.imu_accel : null;
+            drawImuGauge(imuYawRate, imuAccel);
+            var imuLabel = document.getElementById('imuValueLabel');
+            if (imuLabel) imuLabel.textContent = imuYawRate !== null ? Number(imuYawRate).toFixed(1).padStart(6) + '°/s' : '    NA';
+            var rpmLabel = document.getElementById('rpmValueLabel');
+            if (rpmLabel) rpmLabel.textContent = (data.rpm !== undefined && data.rpm !== null) ? data.rpm : 'NA';
+            var flowLabel = document.getElementById('flowValueLabel');
+            if (flowLabel) flowLabel.textContent = (data.optical_flow_speed !== undefined && data.optical_flow_speed !== null) ? data.optical_flow_speed + 'mm/s' : 'NA';
+
+            // Realtime Dataパネルのセンサー値更新（固定桁数）
+            var rtYaw = document.getElementById('rt_yaw_rate');
+            if (rtYaw) rtYaw.textContent = imuYawRate !== null ? Number(imuYawRate).toFixed(1).padStart(7) + ' °/s' : '     NA';
+            var rtAx = document.getElementById('rt_accel_x');
+            if (rtAx) rtAx.textContent = (imuAccel && imuAccel.x !== undefined) ? Number(imuAccel.x).toFixed(2).padStart(7) + ' m/s²' : '     NA';
+            var rtAy = document.getElementById('rt_accel_y');
+            if (rtAy) rtAy.textContent = (imuAccel && imuAccel.y !== undefined) ? Number(imuAccel.y).toFixed(2).padStart(7) + ' m/s²' : '     NA';
+            var rtRpm = document.getElementById('rt_rpm');
+            if (rtRpm) rtRpm.textContent = (data.rpm !== undefined && data.rpm !== null) ? String(data.rpm).padStart(7) + ' rpm' : '     NA';
+            var rtFlow = document.getElementById('rt_flow');
+            if (rtFlow) rtFlow.textContent = (data.optical_flow_speed !== undefined && data.optical_flow_speed !== null) ? String(data.optical_flow_speed).padStart(7) + ' mm/s' : '     NA';
+
+            // センサー可視化の更新（ultrasonic_rangesまたはrangesを使用）
+            const sensorRanges = data.ultrasonic_ranges || data.ranges || {};
+            drawSensorVisualization(
+                sensorRanges,
+                data.lidar_measurements || null,
+                data.lidar_config || null,
+                data.ftg_info || null
+            );
+        }
+
+        function sendWebSocketMessage(message) {
+            if (websocket && websocket.readyState === WebSocket.OPEN) {
+                websocket.send(JSON.stringify(message));
+            } else {
+                console.error('WebSocket is not connected');
+            }
+        }
+
+        // Toggle Drive Control buttons
+        function toggleDriveControl(action) {
+            sendWebSocketMessage({
+                type: 'control',
+                action: action
+            });
+
+            const pauseButton = document.getElementById('pauseButton');
+            const resumeButton = document.getElementById('resumeButton');
+            const setConfigButton = document.getElementById('setConfigButton');
+
+            if (action === 'pause') {
+                pauseButton.classList.add('active');
+                pauseButton.classList.remove('inactive');
+                resumeButton.classList.add('inactive');
+                resumeButton.classList.remove('active');
+                setConfigButton.disabled = false;
+            } else if (action === 'resume') {
+                resumeButton.classList.add('active');
+                resumeButton.classList.remove('inactive');
+                pauseButton.classList.add('inactive');
+                pauseButton.classList.remove('active');
+                setConfigButton.disabled = true;
+            }
+        }
+
+        // Set Config
+        function setConfig() {
+            const form = document.getElementById("configForm");
+            const formData = {};
+
+            Array.from(form.elements).forEach(elem => {
+                if (elem.name) formData[elem.name] = elem.value;
+            });
+
+            sendWebSocketMessage({
+                type: 'set_config',
+                config: formData
+            });
+        }
+
+        function handleConfigResponse(data) {
+            if (data.status === "ok" || data.status === "partial_success") {
+                document.getElementById("configUpdateResult").textContent
+                    = "Updated keys: " + data.updated_keys.join(", ");
+            } else {
+                document.getElementById("configUpdateResult").textContent
+                    = "Error: " + JSON.stringify(data);
+            }
+        }
+
+        // Fetch config and set defaults (WebSocket経由で取得)
+        function fetchConfigAndSetDefaults() {
+            sendWebSocketMessage({
+                type: 'get_config'
+            });
+        }
+
+        function handleGetConfigResponse(data) {
+            if (data.status === "ok" && data.config) {
+                const config = data.config;
+
+                // PLAN_LISTからselectのoptionを動的生成
+                var planSelect = document.getElementById('planSelect');
+                if (config.PLAN_LIST && planSelect) {
+                    planSelect.innerHTML = '';
+                    config.PLAN_LIST.forEach(function(p) {
+                        var opt = document.createElement('option');
+                        opt.value = p;
+                        opt.textContent = p;
+                        planSelect.appendChild(opt);
+                    });
+                }
+
+                // 全inputフィールドにconfigの値を一括設定
+                var inputKeys = ['FORWARD_STRAIGHT', 'FORWARD_CORNER', 'STOP_RANGE', 'BACKWARD_RANGE',
+                    'DETECTION_RANGE', 'RIGHT_LEFT_RANGE', 'TARGET_RANGE', 'TARGET_RANGE_ADJUSTMENT',
+                    'K_P', 'K_I', 'K_D', 'WALL_FOLLOW_K_ANGLE'];
+                inputKeys.forEach(function(key) {
+                    var el = document.querySelector('input[name="' + key + '"]');
+                    if (el && config[key] !== undefined && config[key] !== null) {
+                        el.value = config[key];
+                    }
+                });
+                if (config.PLAN && planSelect) {
+                    planSelect.value = config.PLAN;
+                    // 現在のMODEL_NAMEをdata属性に保存（updateModelOptionsで選択状態にするため）
+                    var modelSelect = document.getElementById('modelSelect');
+                    if (modelSelect && config.MODEL_NAME) {
+                        modelSelect.dataset.current = config.MODEL_NAME;
+                    }
+                    updateModelOptions(config.PLAN);
+                }
+                if (config.HAND_SIDE) {
+                    document.querySelector('select[name="HAND_SIDE"]').value = config.HAND_SIDE;
+                }
+                if (config.WALL_FOLLOW_USE_ALIGNMENT !== undefined) {
+                    document.querySelector('select[name="WALL_FOLLOW_USE_ALIGNMENT"]').value = config.WALL_FOLLOW_USE_ALIGNMENT ? 'true' : 'false';
+                }
+            } else {
+                console.error('Error fetching config:', data.message);
+            }
+        }
+
+
+        // センサー可視化キャンバス（グローバル変数）
+        let sensorCanvas = null;
+        let sensorCtx = null;
+        var lidarZoom = 85;
+        var lidarPan = 75; // 0=上端, 50=中央, 100=下端（デフォルト75=下寄りにロボット配置）
+
+        // Zoom/Panスライダーのイベント
+        (function() {
+            document.addEventListener('DOMContentLoaded', function() {
+                var zoomSlider = document.getElementById('lidarZoomSlider');
+                var zoomLabel = document.getElementById('lidarZoomLabel');
+                if (zoomSlider) {
+                    zoomSlider.oninput = function() {
+                        lidarZoom = parseInt(this.value);
+                        zoomLabel.textContent = lidarZoom;
+                    };
+                }
+                var panSlider = document.getElementById('lidarPanSlider');
+                var panLabel = document.getElementById('lidarPanLabel');
+                if (panSlider) {
+                    panSlider.oninput = function() {
+                        lidarPan = parseInt(this.value);
+                        panLabel.textContent = lidarPan;
+                    };
+                }
+            });
+        })();
+
+        // センサー配置定義（configのZONE_INDEXから動的に設定、フォールバック用デフォルト）
+        // canvas arc: 0=右, 時計回りが正, -PI/2=上=前方
+        var sensorConfig = {
+            FrFR: { angle: -Math.PI / 2, arc: Math.PI / 6, x: 0, y: 0 },
+            FrLH: { angle: -Math.PI / 2 - Math.PI / 4, arc: Math.PI / 6, x: 0, y: 0 },
+            FrRH: { angle: -Math.PI / 2 + Math.PI / 4, arc: Math.PI / 6, x: 0, y: 0 },
+            RrLH: { angle: -Math.PI, arc: Math.PI / 6, x: 0, y: 0 },
+            RrRH: { angle: 0, arc: Math.PI / 6, x: 0, y: 0 }
+        };
+
+        function updateSensorConfigFromLidar(lidarConfig) {
+            if (!lidarConfig || !lidarConfig.zone_angles) return;
+            var za = lidarConfig.zone_angles;
+            Object.keys(za).forEach(function(name) {
+                sensorConfig[name] = {
+                    angle: za[name].center_rad,
+                    arc: za[name].arc_rad,
+                    x: 0, y: 0
+                };
+            });
+        }
+
+        function drawVehicle(centerX, centerY) {
+            sensorCtx.save();
+            sensorCtx.translate(centerX, centerY);
+
+            // 三角形のみ（進行方向を示す）
+            sensorCtx.fillStyle = '#ffffff';
+            sensorCtx.beginPath();
+            sensorCtx.moveTo(0, -8);
+            sensorCtx.lineTo(-6, 5);
+            sensorCtx.lineTo(6, 5);
+            sensorCtx.closePath();
+            sensorCtx.fill();
+
+            sensorCtx.restore();
+        }
+
+        function getDistanceColor(distance) {
+            if (distance < 300) {
+                return '#ff3333'; // 赤（危険）
+            } else if (distance < 600) {
+                return '#ffcc00'; // 黄（警告）
+            } else {
+                return '#33ff66'; // 緑（安全）
+            }
+        }
+
+        function drawSensorFan(centerX, centerY, sensorKey, distance, scaleOverride) {
+            const config = sensorConfig[sensorKey];
+            if (!config) return;
+
+            sensorCtx.save();
+            sensorCtx.translate(centerX + config.x, centerY + config.y);
+
+            // scaleOverride: LiDARスケール(px/mm)が渡された場合はそれを使用
+            const maxRange = scaleOverride ? (distance * scaleOverride) : Math.min(distance / 10, 80);
+
+            // 扇型を描画
+            sensorCtx.fillStyle = getDistanceColor(distance);
+            sensorCtx.globalAlpha = 0.6;
+            sensorCtx.beginPath();
+            sensorCtx.moveTo(0, 0);
+            sensorCtx.arc(0, 0, maxRange,
+                   config.angle - config.arc / 2,
+                   config.angle + config.arc / 2);
+            sensorCtx.closePath();
+            sensorCtx.fill();
+
+            // 扇の輪郭
+            sensorCtx.globalAlpha = 1.0;
+            sensorCtx.strokeStyle = getDistanceColor(distance);
+            sensorCtx.lineWidth = 1;
+            sensorCtx.stroke();
+
+            // 距離テキスト（小さなフォント）
+            sensorCtx.fillStyle = '#cccccc';
+            sensorCtx.font = '8px Arial';
+            sensorCtx.textAlign = 'center';
+            const textX = Math.cos(config.angle) * (maxRange + 10);
+            const textY = Math.sin(config.angle) * (maxRange + 10);
+            sensorCtx.fillText(`${distance}mm`, textX, textY);
+
+            sensorCtx.restore();
+        }
+
+        function drawGrid(centerX, centerY, maxDistanceMm, maxRadiusPx) {
+            sensorCtx.strokeStyle = '#444444';
+            sensorCtx.lineWidth = 1;
+
+            if (maxDistanceMm && maxRadiusPx) {
+                // LiDARモード: 実距離リングを表示
+                var stepMm = 500;
+                if (maxDistanceMm > 5000) stepMm = 2000;
+                else if (maxDistanceMm > 2000) stepMm = 1000;
+                var scale = maxRadiusPx / maxDistanceMm;
+                for (var d = stepMm; d <= maxDistanceMm; d += stepMm) {
+                    var r = d * scale;
+                    if (r > maxRadiusPx) break;
+                    sensorCtx.beginPath();
+                    sensorCtx.arc(centerX, centerY, r, 0, 2 * Math.PI);
+                    sensorCtx.stroke();
+                    sensorCtx.fillStyle = '#999999';
+                    sensorCtx.font = '8px Arial';
+                    sensorCtx.fillText((d >= 1000 ? (d/1000).toFixed(1)+'m' : d+'mm'), centerX + r + 3, centerY - 2);
+                }
+                // 十字線
+                sensorCtx.beginPath();
+                sensorCtx.moveTo(centerX - maxRadiusPx, centerY);
+                sensorCtx.lineTo(centerX + maxRadiusPx, centerY);
+                sensorCtx.moveTo(centerX, centerY - maxRadiusPx);
+                sensorCtx.lineTo(centerX, centerY + maxRadiusPx);
+                sensorCtx.stroke();
+            } else {
+                // 既存モード: 同心円グリッド（調整された間隔）
+                for (let r = 20; r <= 100; r += 20) {
+                    sensorCtx.beginPath();
+                    sensorCtx.arc(centerX, centerY, r, 0, 2 * Math.PI);
+                    sensorCtx.stroke();
+                }
+                // 十字線
+                sensorCtx.beginPath();
+                sensorCtx.moveTo(centerX - 100, centerY);
+                sensorCtx.lineTo(centerX + 100, centerY);
+                sensorCtx.moveTo(centerX, centerY - 100);
+                sensorCtx.lineTo(centerX, centerY + 100);
+                sensorCtx.stroke();
+            }
+        }
+
+        function updateSensorValuesHTML(sensorData) {
+            var panel = document.getElementById('sensorValuesPanel');
+            var column = document.getElementById('sensorInfoColumn');
+            if (!panel || !column) return;
+            var sensorOrder = ['RrLH', 'FrLH', 'FrFR', 'FrRH', 'RrRH'];
+            var items = [];
+            sensorOrder.forEach(function(key) {
+                var value = sensorData[key];
+                if (value !== undefined) {
+                    items.push({key: key, value: value});
+                }
+            });
+
+            // 利用可能な縦幅を推定
+            var availH = column.clientHeight - 8; // padding分
+            var itemH = 16; // 1行あたりの高さ概算
+            var needTwoCols = (items.length * itemH) > availH;
+
+            if (needTwoCols) {
+                column.style.minWidth = '170px';
+                panel.style.cssText = 'font-family:monospace; font-size:11px; line-height:1.4; display:grid; grid-template-columns:1fr 1fr; gap:0 6px;';
+            } else {
+                column.style.minWidth = '90px';
+                panel.style.cssText = 'font-family:monospace; font-size:11px; line-height:1.4; display:flex; flex-direction:column;';
+            }
+
+            var html = '';
+            items.forEach(function(item) {
+                var color = getDistanceColor(item.value);
+                html += '<div style="color:' + color + '; white-space:nowrap;">' + item.key + ':' + item.value + '</div>';
+            });
+            panel.innerHTML = html;
+        }
+
+        function drawLidarPointCloud(centerX, centerY, measurements, lidarConfig, maxRadius) {
+            var numPoints = measurements.length;
+            var angleStart = lidarConfig.angle_start;
+            var angleEnd = lidarConfig.angle_end;
+            var angleOffset = lidarConfig.angle_offset || 0;
+            var clockwise = lidarConfig.clockwise || false;
+            var maxDist = lidarConfig.max_distance;
+            var scale = maxRadius / maxDist;
+
+            for (var i = 0; i < numPoints; i++) {
+                var dist = measurements[i];
+                if (dist <= 0 || dist > maxDist) continue;
+
+                // 角度を生成（ドライバと同じロジック）
+                var angle;
+                if (clockwise) {
+                    angle = angleEnd - (angleEnd - angleStart) * i / (numPoints - 1);
+                } else {
+                    angle = angleStart + (angleEnd - angleStart) * i / (numPoints - 1);
+                }
+                // オフセット適用
+                angle = angle + angleOffset;
+                // -180〜180に正規化
+                angle = ((angle + 180) % 360 + 360) % 360 - 180;
+                var angleRad = angle * Math.PI / 180;
+
+                // 座標変換（上が前方: x=sin, y=-cos）— 0°=front
+                // 標準数学座標(cos,sin)からの変換: 90°=front=up
+                var px = centerX + dist * scale * Math.cos(angleRad);
+                var py = centerY - dist * scale * Math.sin(angleRad);
+
+                // 距離に応じた色（HSL: 赤0→黄60→緑120）
+                var ratio = Math.min(dist / maxDist, 1.0);
+                var hue = ratio * 120;
+                sensorCtx.fillStyle = 'hsl(' + hue + ', 100%, 50%)';
+                sensorCtx.fillRect(px - 1, py - 1, 2, 2);
+            }
+        }
+
+        // FTG角度 → 標準数学角度(0=右,90=上=前方)への変換
+        function ftgAngleToStdRad(ftgAngle, lidarConfig) {
+            var offset = lidarConfig.angle_offset || 0;
+            var cw = lidarConfig.clockwise || false;
+            var stdDeg = cw ? (offset - ftgAngle) : (ftgAngle + offset);
+            return stdDeg * Math.PI / 180;
+        }
+
+        function drawFtgOverlay(centerX, centerY, ftgInfo, lidarConfig, maxRadius) {
+            var maxDist = lidarConfig.max_distance;
+            var scale = maxRadius / maxDist;
+
+            // 1. ギャップ領域（半透明シアン扇形）
+            // 標準数学角度 → canvas arc角度（Y反転のため符号反転）
+            var arcA = -ftgAngleToStdRad(ftgInfo.gap_start_angle, lidarConfig);
+            var arcB = -ftgAngleToStdRad(ftgInfo.gap_end_angle, lidarConfig);
+            var arcStart = Math.min(arcA, arcB);
+            var arcEnd = Math.max(arcA, arcB);
+            sensorCtx.save();
+            sensorCtx.globalAlpha = 0.2;
+            sensorCtx.fillStyle = '#00ffff';
+            sensorCtx.beginPath();
+            sensorCtx.moveTo(centerX, centerY);
+            sensorCtx.arc(centerX, centerY, maxRadius, arcStart, arcEnd);
+            sensorCtx.closePath();
+            sensorCtx.fill();
+            sensorCtx.restore();
+
+            // 2. 目標矢印（黒アウトライン＋オレンジ塗り＋ターゲットドット）
+            var targetAngleRad = ftgAngleToStdRad(ftgInfo.target_angle, lidarConfig);
+            var arrowLen = Math.min(ftgInfo.target_distance * scale, maxRadius * 0.9);
+            if (arrowLen < 20) arrowLen = 20;
+            var endX = centerX + arrowLen * Math.cos(targetAngleRad);
+            var endY = centerY - arrowLen * Math.sin(targetAngleRad);
+            var baseAngle = Math.atan2(endY - centerY, endX - centerX);
+            var headLen = 12;
+
+            sensorCtx.save();
+            // 矢印の線（黒アウトライン）
+            sensorCtx.strokeStyle = '#000000';
+            sensorCtx.lineWidth = 5;
+            sensorCtx.lineCap = 'round';
+            sensorCtx.beginPath();
+            sensorCtx.moveTo(centerX, centerY);
+            sensorCtx.lineTo(endX, endY);
+            sensorCtx.stroke();
+            // 矢印の線（オレンジ内側）
+            sensorCtx.strokeStyle = '#ff6600';
+            sensorCtx.lineWidth = 3;
+            sensorCtx.beginPath();
+            sensorCtx.moveTo(centerX, centerY);
+            sensorCtx.lineTo(endX, endY);
+            sensorCtx.stroke();
+
+            // 矢じり（黒アウトライン＋オレンジ塗り）
+            sensorCtx.beginPath();
+            sensorCtx.moveTo(endX, endY);
+            sensorCtx.lineTo(endX - headLen * Math.cos(baseAngle - 0.45), endY - headLen * Math.sin(baseAngle - 0.45));
+            sensorCtx.lineTo(endX - headLen * Math.cos(baseAngle + 0.45), endY - headLen * Math.sin(baseAngle + 0.45));
+            sensorCtx.closePath();
+            sensorCtx.fillStyle = '#ff6600';
+            sensorCtx.fill();
+            sensorCtx.strokeStyle = '#000000';
+            sensorCtx.lineWidth = 2;
+            sensorCtx.stroke();
+
+            // ターゲットドット（先端に白丸＋黒縁）
+            sensorCtx.beginPath();
+            sensorCtx.arc(endX, endY, 5, 0, 2 * Math.PI);
+            sensorCtx.fillStyle = '#ffffff';
+            sensorCtx.fill();
+            sensorCtx.strokeStyle = '#ff6600';
+            sensorCtx.lineWidth = 2;
+            sensorCtx.stroke();
+            sensorCtx.restore();
+
+            // 3. 情報テキスト（右上）
+            sensorCtx.save();
+            sensorCtx.fillStyle = '#cccccc';
+            sensorCtx.font = '9px Arial';
+            sensorCtx.textAlign = 'right';
+            var tx = sensorCanvas.width - 5;
+            var ty = 12;
+            sensorCtx.fillText('Tgt: ' + ftgInfo.target_angle.toFixed(1) + ' / ' + ftgInfo.target_distance.toFixed(0) + 'mm', tx, ty);
+            sensorCtx.fillText('Near: ' + ftgInfo.closest_dist.toFixed(0) + 'mm  ' + ftgInfo.steering_method, tx, ty + 12);
+            sensorCtx.restore();
+        }
+
+        function drawSensorVisualization(ultrasonicRanges, lidarMeasurements, lidarConfig, ftgInfo) {
+            if (!sensorCanvas || !sensorCtx) {
+                console.error('Sensor canvas not initialized');
+                return;
+            }
+
+            // キャンバスを黒で塗りつぶし
+            sensorCtx.fillStyle = '#000000';
+            sensorCtx.fillRect(0, 0, sensorCanvas.width, sensorCanvas.height);
+
+            var centerX = sensorCanvas.width / 2;
+            // lidarPan: 0=上端, 50=中央, 100=下端
+            var centerY = sensorCanvas.height * (lidarPan / 100);
+
+            // lidarConfigからセンサー配置を動的更新
+            if (lidarConfig) updateSensorConfigFromLidar(lidarConfig);
+
+            // Zoom/Panスライダーの表示制御
+            var zoomCol = document.getElementById('lidarZoomColumn');
+            var panCol = document.getElementById('lidarPanColumn');
+            var hasLidar = !!(lidarMeasurements && lidarConfig);
+            if (zoomCol) zoomCol.style.display = hasLidar ? 'flex' : 'none';
+            if (panCol) panCol.style.display = hasLidar ? 'flex' : 'none';
+
+            // センサー値をHTMLパネルに表示
+            var sensorData = (ultrasonicRanges && Object.keys(ultrasonicRanges).length > 0) ? ultrasonicRanges : null;
+            if (sensorData) {
+                updateSensorValuesHTML(sensorData);
+            }
+
+            if (hasLidar) {
+                // LiDAR点群モード: キャンバス中央にセンタリング
+                var maxRadius = lidarZoom;
+
+                drawGrid(centerX, centerY, lidarConfig.max_distance, maxRadius);
+                drawLidarPointCloud(centerX, centerY, lidarMeasurements, lidarConfig, maxRadius);
+
+                // 超音波扇形も重ねて表示（LiDARと同じスケール）
+                var fanScale = maxRadius / lidarConfig.max_distance;
+                if (sensorData) {
+                    Object.entries(sensorData).forEach(function(entry) {
+                        var key = entry[0], value = entry[1];
+                        if (sensorConfig[key] && value !== undefined) {
+                            drawSensorFan(centerX, centerY, key, value, fanScale);
+                        }
+                    });
+                }
+
+                if (ftgInfo && lidarConfig.plan === 'follow_the_gap') {
+                    drawFtgOverlay(centerX, centerY, ftgInfo, lidarConfig, maxRadius);
+                }
+                drawVehicle(centerX, centerY);
+            } else {
+                // 既存ゾーン扇形モード
+                drawGrid(centerX, centerY);
+
+                var defaultSensorValues = {
+                    RrLH: 850, FrLH: 450, FrFR: 250, FrRH: 650, RrRH: 1200
+                };
+                var drawData = sensorData || defaultSensorValues;
+
+                Object.entries(drawData).forEach(function(entry) {
+                    var key = entry[0], value = entry[1];
+                    if (sensorConfig[key] && value !== undefined) {
+                        drawSensorFan(centerX, centerY, key, value);
+                    }
+                });
+
+                drawVehicle(centerX, centerY);
+
+                // HTMLパネルにデフォルト値も表示
+                if (!sensorData) updateSensorValuesHTML(drawData);
+            }
+        }
+
+        // センサーキャンバスを初期化・リサイズする関数
+        function resizeSensorCanvas() {
+            var wrap = document.getElementById('sensorCanvasWrap');
+            var canvas = document.getElementById('sensorCanvas');
+            if (!wrap || !canvas) return;
+            var w = wrap.clientWidth;
+            var h = wrap.clientHeight;
+            if (w < 50) w = 50;
+            if (h < 50) h = 50;
+            canvas.width = w;
+            canvas.height = h;
+            canvas.style.width = w + 'px';
+            canvas.style.height = h + 'px';
+        }
+
+        function initializeSensorCanvas() {
+            sensorCanvas = document.getElementById('sensorCanvas');
+            if (!sensorCanvas) {
+                console.error('Sensor canvas element not found!');
+                return;
+            }
+            resizeSensorCanvas();
+            sensorCtx = sensorCanvas.getContext('2d');
+            console.log('Sensor canvas initialized:', sensorCanvas.width, 'x', sensorCanvas.height);
+
+            window.addEventListener('resize', function() {
+                resizeSensorCanvas();
+                sensorCtx = sensorCanvas.getContext('2d');
+                drawSensorVisualization();
+            });
+
+            // 初期描画
+            drawSensorVisualization();
+        }
+
+        // ステアリングハンドルを描画する関数
+        function drawSteeringWheel(steeringValue) {
+            const canvas = document.getElementById('steeringCanvas');
+            if (!canvas) return;
+
+            const ctx = canvas.getContext('2d');
+            const centerX = canvas.width / 2;
+            const centerY = canvas.height / 2;
+            const radius = Math.min(canvas.width, canvas.height) / 2 - 2;
+
+            // キャンバスをクリア
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 回転角度を計算（-1 to 1 -> -90度 to 90度）
+            const rotation = steeringValue * Math.PI / 2;
+
+            ctx.save();
+            ctx.translate(centerX, centerY);
+            ctx.rotate(rotation);
+
+            // ハンドル外枠
+            ctx.beginPath();
+            ctx.arc(0, 0, radius, 0, 2 * Math.PI);
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+
+            // ハンドル内部
+            ctx.beginPath();
+            ctx.arc(0, 0, radius - 5, 0, 2 * Math.PI);
+            ctx.fillStyle = '#f0f0f0';
+            ctx.fill();
+
+            // 中央のハブ
+            ctx.beginPath();
+            ctx.arc(0, 0, 8, 0, 2 * Math.PI);
+            ctx.fillStyle = '#666';
+            ctx.fill();
+
+            // スポーク（上下左右）
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(0, -radius + 5);
+            ctx.lineTo(0, -8);
+            ctx.moveTo(0, 8);
+            ctx.lineTo(0, radius - 5);
+            ctx.moveTo(-radius + 5, 0);
+            ctx.lineTo(-8, 0);
+            ctx.moveTo(8, 0);
+            ctx.lineTo(radius - 5, 0);
+            ctx.stroke();
+
+            // 上方向インジケーター（12時の位置）
+            ctx.beginPath();
+            ctx.arc(0, -radius + 12, 4, 0, 2 * Math.PI);
+            ctx.fillStyle = '#ff4444';
+            ctx.fill();
+
+            ctx.restore();
+        }
+
+        // スロットルゲージを描画する関数
+        function drawThrottleGauge(throttleValue) {
+            const canvas = document.getElementById('throttleCanvas');
+            if (!canvas) return;
+
+            const ctx = canvas.getContext('2d');
+            const width = canvas.width;
+            const height = canvas.height;
+
+            // キャンバスをクリア
+            ctx.clearRect(0, 0, width, height);
+
+            // F/Rラベル領域を確保してゲージを描画
+            const centerX = width / 2;
+            var labelH = 10; // ラベル用の上下余白
+            var gaugeTop = labelH + 2;
+            var gaugeBottom = height - labelH - 2;
+            var gaugeH = gaugeBottom - gaugeTop;
+            const centerY = gaugeTop + gaugeH / 2;
+            var barW = Math.min(Math.round(width * 0.6), 20);
+            var barX = centerX - barW / 2;
+
+            // Fラベル（上）
+            ctx.fillStyle = '#333';
+            ctx.font = '11px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.fillText('F', centerX, 1);
+
+            // ゲージ背景
+            ctx.fillStyle = '#f0f0f0';
+            ctx.fillRect(barX, gaugeTop, barW, gaugeH);
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(barX, gaugeTop, barW, gaugeH);
+
+            // 中央線（0の位置）
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(barX - 2, centerY);
+            ctx.lineTo(barX + barW + 2, centerY);
+            ctx.stroke();
+
+            // スケール線
+            for (let i = 1; i <= 4; i++) {
+                const y1 = centerY - (i * gaugeH / 8);
+                const y2 = centerY + (i * gaugeH / 8);
+                ctx.beginPath();
+                ctx.moveTo(barX - 1, y1);
+                ctx.lineTo(barX + 2, y1);
+                ctx.moveTo(barX - 1, y2);
+                ctx.lineTo(barX + 2, y2);
+                ctx.stroke();
+            }
+
+            // ゲージバー
+            let barHeight = Math.abs(throttleValue) * gaugeH / 2;
+            let barY, barColor;
+
+            if (throttleValue > 0) {
+                barY = centerY - barHeight;
+                barColor = '#44ff44';
+            } else if (throttleValue < 0) {
+                barY = centerY;
+                barColor = '#ff4444';
+            } else {
+                barHeight = 0;
+                barY = centerY;
+                barColor = '#666';
+            }
+
+            if (barHeight > 0) {
+                ctx.fillStyle = barColor;
+                ctx.fillRect(barX + 1, barY, barW - 2, barHeight);
+            }
+
+            // Rラベル（下）
+            ctx.fillStyle = '#333';
+            ctx.font = '11px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'bottom';
+            ctx.fillText('R', centerX, height - 1);
+        }
+
+
+        // IMUヨーレートゲージを描画する関数
+        // accel: {x: 前後m/s², y: 左右m/s²} x正=前進加速, y正=右加速
+        function drawImuGauge(yawRate, accel) {
+            const canvas = document.getElementById('imuCanvas');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width, h = canvas.height;
+            const cx = w / 2, cy = h / 2;
+            const outerR = Math.min(w, h) / 2 - 1;  // 円弧用外径
+            const arcW = 4;                           // 円弧の太さ
+            const radius = outerR - arcW - 1;         // 内側の円（加速度表示用）
+
+            ctx.clearRect(0, 0, w, h);
+
+            if (yawRate === null || yawRate === undefined) {
+                ctx.beginPath();
+                ctx.arc(cx, cy, outerR, 0, 2 * Math.PI);
+                ctx.strokeStyle = '#999';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+                ctx.fillStyle = '#ccc';
+                ctx.font = '10px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText('NA', cx, cy);
+                return;
+            }
+
+            // --- ヨーレート円弧 ---
+            // 背景トラック（グレー）
+            ctx.beginPath();
+            ctx.arc(cx, cy, outerR - arcW / 2, 0, 2 * Math.PI);
+            ctx.strokeStyle = '#ddd';
+            ctx.lineWidth = arcW;
+            ctx.stroke();
+
+            // 値の円弧: 12時（上）を0として、右=正、左=負
+            var maxRate = 180;
+            var clampedRate = Math.max(-maxRate, Math.min(maxRate, yawRate));
+            var sweepAngle = (clampedRate / maxRate) * Math.PI; // ±πにマッピング
+            var startAngle = -Math.PI / 2; // 12時位置
+
+            var absRate = Math.abs(clampedRate);
+            var arcColor = absRate < 30 ? '#33ff66' : absRate < 90 ? '#ffcc00' : '#ff3333';
+
+            ctx.beginPath();
+            if (sweepAngle >= 0) {
+                ctx.arc(cx, cy, outerR - arcW / 2, startAngle, startAngle + sweepAngle);
+            } else {
+                ctx.arc(cx, cy, outerR - arcW / 2, startAngle + sweepAngle, startAngle);
+            }
+            ctx.strokeStyle = arcColor;
+            ctx.lineWidth = arcW;
+            ctx.lineCap = 'round';
+            ctx.stroke();
+
+            // 12時位置マーカー（小さいティック）
+            ctx.beginPath();
+            ctx.moveTo(cx, cy - outerR + 1);
+            ctx.lineTo(cx, cy - outerR + arcW + 2);
+            ctx.strokeStyle = '#666';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            // --- 内側の円（加速度表示） ---
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius, 0, 2 * Math.PI);
+            ctx.strokeStyle = '#bbb';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.arc(cx, cy, radius - 0.5, 0, 2 * Math.PI);
+            ctx.fillStyle = '#f5f5f5';
+            ctx.fill();
+
+            // --- 加速度三角形（上下左右）+ 数値 ---
+            if (accel) {
+                var maxAccel = 10.0;
+                var triSize = 4;
+                var triOffset = radius - 2;
+
+                function accelColor(val) {
+                    var absVal = Math.abs(val);
+                    if (absVal < 1.0) return '#66cc66';
+                    if (absVal < 5.0) return '#ffcc00';
+                    return '#ff4444';
+                }
+                function accelAlpha(val) {
+                    return Math.min(1.0, 0.3 + (Math.abs(val) / maxAccel) * 0.7);
+                }
+
+                var ax = accel.x || 0;
+                var ay = accel.y || 0;
+                var fs = Math.max(6, Math.round(radius * 0.38));
+                var lf = fs + 'px monospace';
+                var textOff = triSize * 1.5 + 1; // 三角底辺から内側へ
+
+                ctx.save();
+                ctx.translate(cx, cy);
+
+                // 上（前進加速）
+                ctx.globalAlpha = ax > 0 ? accelAlpha(ax) : 0.15;
+                ctx.fillStyle = ax > 0 ? accelColor(ax) : '#999';
+                ctx.beginPath();
+                ctx.moveTo(0, -triOffset);
+                ctx.lineTo(-triSize, -triOffset + triSize * 1.5);
+                ctx.lineTo(triSize, -triOffset + triSize * 1.5);
+                ctx.closePath(); ctx.fill();
+                ctx.globalAlpha = 1.0; ctx.fillStyle = '#333'; ctx.font = lf;
+                ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+                ctx.fillText(Math.abs(ax).toFixed(1), 0, -triOffset + textOff);
+
+                // 下（減速）
+                ctx.globalAlpha = ax < 0 ? accelAlpha(ax) : 0.15;
+                ctx.fillStyle = ax < 0 ? accelColor(ax) : '#999';
+                ctx.beginPath();
+                ctx.moveTo(0, triOffset);
+                ctx.lineTo(-triSize, triOffset - triSize * 1.5);
+                ctx.lineTo(triSize, triOffset - triSize * 1.5);
+                ctx.closePath(); ctx.fill();
+                ctx.globalAlpha = 1.0; ctx.fillStyle = '#333'; ctx.font = lf;
+                ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+                ctx.fillText(Math.abs(ax).toFixed(1), 0, triOffset - textOff);
+
+                // 右
+                ctx.globalAlpha = ay > 0 ? accelAlpha(ay) : 0.15;
+                ctx.fillStyle = ay > 0 ? accelColor(ay) : '#999';
+                ctx.beginPath();
+                ctx.moveTo(triOffset, 0);
+                ctx.lineTo(triOffset - triSize * 1.5, -triSize);
+                ctx.lineTo(triOffset - triSize * 1.5, triSize);
+                ctx.closePath(); ctx.fill();
+                ctx.globalAlpha = 1.0; ctx.fillStyle = '#333'; ctx.font = lf;
+                ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+                ctx.fillText(Math.abs(ay).toFixed(1), triOffset - textOff, 0);
+
+                // 左
+                ctx.globalAlpha = ay < 0 ? accelAlpha(ay) : 0.15;
+                ctx.fillStyle = ay < 0 ? accelColor(ay) : '#999';
+                ctx.beginPath();
+                ctx.moveTo(-triOffset, 0);
+                ctx.lineTo(-triOffset + triSize * 1.5, -triSize);
+                ctx.lineTo(-triOffset + triSize * 1.5, triSize);
+                ctx.closePath(); ctx.fill();
+                ctx.globalAlpha = 1.0; ctx.fillStyle = '#333'; ctx.font = lf;
+                ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+                ctx.fillText(Math.abs(ay).toFixed(1), -triOffset + textOff, 0);
+
+                ctx.restore();
+            }
+        }
+
+        // リサイズ機能の実装
+        let isResizingHorizontal = false;
+        let isResizingVertical = false;
+
+        function initResizers() {
+            const horizontalResizer = document.getElementById('horizontalResizer');
+            const verticalResizer = document.getElementById('verticalResizer');
+            const cameraContainer = document.querySelector('.camera-container');
+            const controlContainer = document.querySelector('.control-container');
+            const mainWrapper = document.querySelector('.main-wrapper');
+            const container = document.querySelector('.container');
+            const realtimeData = document.querySelector('.realtime-data');
+
+            // 水平リサイザー (カメラとコントロールパネルの間)
+            horizontalResizer.addEventListener('mousedown', (e) => {
+                isResizingHorizontal = true;
+                document.body.style.cursor = 'col-resize';
+                e.preventDefault();
+            });
+
+            // 垂直リサイザー (メインコンテナとリアルタイムデータの間)
+            verticalResizer.addEventListener('mousedown', (e) => {
+                isResizingVertical = true;
+                document.body.style.cursor = 'row-resize';
+                e.preventDefault();
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (isResizingHorizontal) {
+                    const containerRect = container.getBoundingClientRect();
+                    const newControlWidth = containerRect.right - e.clientX - 8; // 8px for resizer
+
+                    if (newControlWidth >= 200 && newControlWidth <= 800) {
+                        controlContainer.style.width = newControlWidth + 'px';
+                        resizeSensorCanvas();
+                    }
+                } else if (isResizingVertical) {
+                    const wrapperRect = mainWrapper.getBoundingClientRect();
+                    const newRealtimeHeight = wrapperRect.bottom - e.clientY - 8; // 8px for resizer
+
+                    if (newRealtimeHeight >= 80) {
+                        realtimeData.style.flex = '0 0 ' + newRealtimeHeight + 'px';
+                        resizeSensorCanvas();
+                    }
+                }
+            });
+
+            document.addEventListener('mouseup', () => {
+                if (isResizingHorizontal || isResizingVertical) {
+                    resizeSensorCanvas();
+                    if (sensorCtx) {
+                        sensorCtx = sensorCanvas.getContext('2d');
+                        drawSensorVisualization();
+                    }
+                }
+                isResizingHorizontal = false;
+                isResizingVertical = false;
+                document.body.style.cursor = 'default';
+            });
+        }
+
+        // Initialize the page
+        document.addEventListener('DOMContentLoaded', () => {
+            // WebSocket接続を開始
+            connectWebSocket();
+
+            // センサーキャンバスの初期化
+            initializeSensorCanvas();
+
+            // ステアリングハンドルとスロットルゲージの初期化
+            drawSteeringWheel(0);
+            drawThrottleGauge(0);
+            drawImuGauge(null, null);
+
+            // リサイザーの初期化
+            initResizers();
+
+            // WebSocket接続後に設定を取得
+            setTimeout(() => {
+                fetchConfigAndSetDefaults();
+            }, 1000);
+        });
+    </script>
+</body>
+</html>

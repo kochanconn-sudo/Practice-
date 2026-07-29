@@ -1,0 +1,1265 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>LiDAR ビジュアライザー</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f5f5f5;
+            overflow: hidden;
+            height: 100vh;
+        }
+        .container {
+            display: flex;
+            height: 100vh;
+            width: 100%;
+        }
+        .left-panel {
+            width: 350px;
+            background-color: white;
+            box-shadow: 2px 0 10px rgba(0,0,0,0.1);
+            padding: 20px;
+            overflow-y: auto;
+            box-sizing: border-box;
+        }
+        .right-panel {
+            flex: 1;
+            background-color: #f9f9f9;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        h1 {
+            color: #333;
+            margin-top: 0;
+            font-size: 24px;
+            margin-bottom: 20px;
+        }
+        .controls {
+            margin-bottom: 20px;
+        }
+        .control-group {
+            margin-bottom: 20px;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 8px;
+            border: 1px solid #e9ecef;
+        }
+        .control-group h3 {
+            margin-top: 0;
+            margin-bottom: 15px;
+            color: #495057;
+            font-size: 16px;
+        }
+        button {
+            padding: 8px 16px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            width: 100%;
+            margin-bottom: 8px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button.active {
+            background-color: #2196F3;
+        }
+        .visualization {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        canvas {
+            background-color: white;
+            border: none;
+            border-radius: 0;
+            max-width: 100%;
+            max-height: 100%;
+        }
+        .stat-box {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+            background-color: #f8f9fa;
+        }
+        h3 {
+            margin-top: 0;
+            margin-bottom: 10px;
+            color: #444;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        .checkbox-group {
+            margin-bottom: 10px;
+        }
+        .checkbox-group label {
+            font-weight: normal;
+            cursor: pointer;
+        }
+        .zoom-slider {
+            width: 100%;
+            margin: 10px 0;
+        }
+        .zoom-info {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 5px;
+        }
+        .info-box {
+            background-color: #e3f2fd;
+            padding: 8px 12px;
+            border-radius: 5px;
+            border-left: 4px solid #2196F3;
+            margin-bottom: 15px;
+            font-size: 12px;
+            line-height: 1.4;
+        }
+        .param-group {
+            margin-bottom: 15px;
+        }
+        .param-slider {
+            width: 100%;
+            margin-top: 5px;
+        }
+        select {
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            font-size: 14px;
+        }
+        .stats-grid p {
+            margin: 5px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="left-panel">
+            <h1>LiDAR ビジュアライザー</h1>
+            
+            <div class="info-box">
+                <b>{{ lidar_config.type }}</b> | {{ lidar_config.min_distance }}-{{ lidar_config.max_distance }}mm | {{ lidar_config.angle_range }}° | {{ lidar_config.scan_rate }}Hz<br>
+                データ点数: <span id="point-count">{{ lidar_config.data_points }}</span> | 除外点数: <span id="ignored-points">0</span> (範囲: <span id="ignore-distance">150</span>mm)<br>
+                物体検出内点数: <span id="obstacle-count">0</span>個 | 壁検出: <span id="wall-count">0</span>個<br>
+                <div id="zone-details" style="font-size: 12px; margin-top: 5px;">
+                    各ゾーン点群数:<br> <span id="zone-point-counts">読込中...</span>
+                </div>
+                <small style="color: #666;">
+                物体検出: ゾーン別閾値 {{ lidar_config.zone_distance_thresholds }}mm <br>
+                壁検出: <span id="wall-detection-method">手法選択中</span>
+                </small>
+            </div>
+            
+            <div class="control-group">
+                <h3>表示設定</h3>
+                <div class="zoom-info">
+                    <label for="zoom-slider">表示倍率:</label>
+                    <span id="zoom-value">400%</span>
+                </div>
+                <input type="range" id="zoom-slider" class="zoom-slider" min="25" max="800" value="400" step="25">
+                <div style="display: flex; justify-content: space-between; font-size: 12px; color: #666; margin-top: 5px;">
+                    <span>25%<br>(コース全体確認)</span>
+                    <span>400%<br>(コース一部確認)</span>
+                    <span>800%<br>(近距離確認)</span>
+                </div>
+                
+                <div style="margin-top: 15px;">
+                    <!-- 表示設定ボタンを2列で配置 -->
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                        <button id="toggle-walls" class="display-toggle-btn active" style="padding: 8px; font-size: 11px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;">壁検出</button>
+                        <button id="toggle-segment-info" class="display-toggle-btn active" style="padding: 8px; font-size: 11px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;">番号/端点</button>
+                        <button id="toggle-angle-lines" class="display-toggle-btn active" style="padding: 8px; font-size: 11px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;">角度線</button>
+                        <button id="toggle-distance-circles" class="display-toggle-btn active" style="padding: 8px; font-size: 11px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;">距離円</button>
+                        <button id="toggle-labels" class="display-toggle-btn active" style="padding: 8px; font-size: 11px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;">ラベル</button>
+                    </div>
+                </div>
+            </div>
+            
+            
+            <div class="control-group">
+                <h3>壁検出設定</h3>
+                <div style="margin-bottom: 15px;">
+                    <label for="detection-method">検出手法:</label>
+                    <select id="detection-method" style="width: 100%; padding: 5px; margin-top: 5px;">
+                        <option value="distance_based" selected>Distance Based</option>
+                        <option value="split_merge">Split & Merge</option>
+                        <option value="ransac">RANSAC</option>
+                        <option value="sliding_window">Sliding Window</option>
+                        <option value="hybrid">Hybrid</option>
+                    </select>
+                </div>
+                
+                <!-- ボタンを横並びに配置 -->
+                <div style="display: flex; gap: 8px; margin-bottom: 15px;">
+                    <button id="toggle-detection" style="flex: 1; background-color: #4CAF50; padding: 8px; font-size: 12px;">検出を有効化</button>
+                    <button id="debug-info" style="flex: 1; background-color: #FF9800; padding: 8px; font-size: 12px;">デバッグ情報</button>
+                </div>
+                
+                <!-- パラメータ調整を統合 -->
+                <div id="parameter-controls" style="display: none;">
+                    <h4 style="margin: 10px 0 8px 0; font-size: 14px;">パラメータ調整</h4>
+                    <div class="param-group" id="max-gap-param">
+                        <label for="max-gap">点間最大距離 (mm): <span id="max-gap-value">500</span></label>
+                        <input type="range" id="max-gap" min="100" max="1000" step="50" value="500" class="param-slider">
+                    </div>
+                    <div class="param-group" id="min-wall-points-param">
+                        <label for="min-wall-points">最小点数: <span id="min-wall-points-value">3</span></label>
+                        <input type="range" id="min-wall-points" min="3" max="50" step="1" value="3" class="param-slider">
+                    </div>
+                    <div class="param-group" id="max-linearity-param">
+                        <label for="max-linearity">最大直線偏差 (0=全領域): <span id="max-linearity-value">0</span></label>
+                        <input type="range" id="max-linearity" min="0" max="0.3" step="0.01" value="0" class="param-slider">
+                    </div>
+                    <div class="param-group" id="distance-based-params" style="display: none;">
+                        <label for="draw-polyline">
+                            <input type="checkbox" id="draw-polyline" checked> 全点を接続して描画（ポリライン）
+                        </label>
+                    </div>
+                    <div class="param-group" id="split-merge-params" style="display: none;">
+                        <label for="max-gap-sm">点間最大距離 (mm): <span id="max-gap-sm-value">500</span></label>
+                        <input type="range" id="max-gap-sm" min="100" max="1000" step="50" value="500" class="param-slider">
+                        <label for="split-epsilon">分割閾値 (mm): <span id="split-epsilon-value">60</span></label>
+                        <input type="range" id="split-epsilon" min="10" max="150" step="5" value="60" class="param-slider">
+                        <label for="min-segment-length">最小セグメント長 (mm): <span id="min-segment-length-value">400</span></label>
+                        <input type="range" id="min-segment-length" min="100" max="1000" step="50" value="400" class="param-slider">
+                        <label for="use-adaptive">
+                            <input type="checkbox" id="use-adaptive" checked> 適応的閾値を使用
+                        </label>
+                        <label for="use-2d-optimization">
+                            <input type="checkbox" id="use-2d-optimization" checked> 2D最適化を使用
+                        </label>
+                        <label for="draw-polyline-sm">
+                            <input type="checkbox" id="draw-polyline-sm" checked> 全点を接続して描画（ポリライン）
+                        </label>
+                    </div>
+                    <div class="param-group" id="ransac-params" style="display: none;">
+                        <label for="ransac-threshold">RANSAC閾値 (mm): <span id="ransac-threshold-value">60</span></label>
+                        <input type="range" id="ransac-threshold" min="10" max="150" step="5" value="60" class="param-slider">
+                        <label for="min-inlier-ratio">最小インライア比: <span id="min-inlier-ratio-value">0.6</span></label>
+                        <input type="range" id="min-inlier-ratio" min="0.3" max="0.9" step="0.1" value="0.6" class="param-slider">
+                        <label for="max-trials">最大試行回数: <span id="max-trials-value">150</span></label>
+                        <input type="range" id="max-trials" min="50" max="300" step="10" value="150" class="param-slider">
+                        <label for="early-stop-ratio">早期終了閾値: <span id="early-stop-ratio-value">0.9</span></label>
+                        <input type="range" id="early-stop-ratio" min="0.5" max="1.0" step="0.05" value="0.9" class="param-slider">
+                    </div>
+                    <div class="param-group" id="sliding-params" style="display: none;">
+                        <label for="window-size">ウィンドウサイズ: <span id="window-size-value">20</span></label>
+                        <input type="range" id="window-size" min="10" max="50" step="5" value="20" class="param-slider">
+                        <label for="window-stride">ウィンドウストライド: <span id="window-stride-value">5</span></label>
+                        <input type="range" id="window-stride" min="1" max="20" step="1" value="5" class="param-slider">
+                        <label for="overlap-threshold">重複閾値 (mm): <span id="overlap-threshold-value">700</span></label>
+                        <input type="range" id="overlap-threshold" min="100" max="1500" step="50" value="700" class="param-slider">
+                    </div>
+                    <div class="param-group" id="hybrid-params" style="display: none;">
+                        <label for="confidence-threshold">信頼度閾値: <span id="confidence-threshold-value">0.8</span></label>
+                        <input type="range" id="confidence-threshold" min="0.5" max="1.0" step="0.05" value="0.8" class="param-slider">
+                    </div>
+                    <button id="apply-params" style="background-color: #4CAF50; margin-top: 10px; width: 100%; padding: 8px; font-size: 12px;">パラメータを適用</button>
+                </div>
+                
+                <div id="debug-display" style="display: none; font-size: 11px; background-color: #f5f5f5; padding: 10px; margin-top: 10px; border-radius: 4px; white-space: pre-line;"></div>
+            </div>
+            
+        </div>
+        
+        <div class="right-panel">
+            <div class="visualization">
+                <canvas id="lidar-canvas" width="800" height="800"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // configから閾値を取得
+        const zoneThresholds = {{ lidar_config.zone_distance_thresholds | tojson }};
+
+        document.addEventListener('DOMContentLoaded', function() {
+            const canvas = document.getElementById('lidar-canvas');
+            const ctx = canvas.getContext('2d');
+            
+            // キャンバスのサイズを動的に設定
+            function resizeCanvas() {
+                const container = document.querySelector('.visualization');
+                const size = Math.min(container.clientWidth, container.clientHeight);
+                canvas.width = size;
+                canvas.height = size;
+                return size;
+            }
+            
+            let canvasSize = resizeCanvas();
+            window.addEventListener('resize', function() {
+                canvasSize = resizeCanvas();
+            });
+            
+            const baseScale = canvasSize / 20000; // 20000mm(20m)を基準にした表示範囲
+            let zoomLevel = 1.0; // 初期ズームレベル
+            
+            let showWalls = true;
+            let showSegmentInfo = true;  // セグメント番号と端点の表示
+            let showAngleLines = true;
+            let showDistanceCircles = true;
+            let showLabels = true;
+            
+            let lidarPoints = [];
+            let wallSegments = [];
+            let angleOffset = 0;  // LiDARの角度オフセット
+            let detectionDetails = [];  // 検出詳細情報
+            let zoneRanges = [];  // ゾーン範囲情報
+            let ignoreDistance = 150;  // 除外距離 (mm)
+            
+            // 表示設定ボタンのイベントリスナー設定
+            function setupDisplayToggleButton(buttonId, variable) {
+                const button = document.getElementById(buttonId);
+                button.addEventListener('click', function() {
+                    const isActive = this.classList.contains('active');
+                    if (isActive) {
+                        this.classList.remove('active');
+                        this.style.backgroundColor = '#666';
+                        eval(variable + ' = false');
+                    } else {
+                        this.classList.add('active');
+                        this.style.backgroundColor = '#4CAF50';
+                        eval(variable + ' = true');
+                    }
+                });
+            }
+            
+            setupDisplayToggleButton('toggle-walls', 'showWalls');
+            setupDisplayToggleButton('toggle-segment-info', 'showSegmentInfo');
+            setupDisplayToggleButton('toggle-angle-lines', 'showAngleLines');
+            setupDisplayToggleButton('toggle-distance-circles', 'showDistanceCircles');
+            setupDisplayToggleButton('toggle-labels', 'showLabels');
+            
+            // 壁検出設定
+            let wallDetectionEnabled = false;
+            let currentDetectionMethod = 'distance_based';
+            
+            // 検出手法変更
+            document.getElementById('detection-method').addEventListener('change', function() {
+                const method = this.value;
+                fetch('/set_detection_method', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({method: method})
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        currentDetectionMethod = method;
+                        updateParameterVisibility(method);
+                        // 検出手法変更時にパラメータを再取得して反映
+                        updateDetectorParameters();
+                        // 検出手法変更時にデバッグ情報を更新
+                        updateDebugInfo();
+                    }
+                });
+            });
+            
+            // 検出有効/無効切り替え
+            document.getElementById('toggle-detection').addEventListener('click', function() {
+                fetch('/toggle_wall_detection', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => {
+                    wallDetectionEnabled = data.enabled;
+                    this.textContent = wallDetectionEnabled ? '検出を無効化' : '検出を有効化';
+                    this.style.backgroundColor = wallDetectionEnabled ? '#f44336' : '#4CAF50';
+                    document.getElementById('parameter-controls').style.display = 
+                        wallDetectionEnabled ? 'block' : 'none';
+                });
+            });
+            
+            // パラメータスライダー
+            const paramSliders = ['max-gap', 'max-gap-sm', 'min-wall-points', 'max-linearity',
+                                'split-epsilon', 'min-segment-length',
+                                'ransac-threshold', 'min-inlier-ratio', 'max-trials', 'early-stop-ratio',
+                                'window-size', 'window-stride', 'overlap-threshold',
+                                'confidence-threshold'];
+            paramSliders.forEach(param => {
+                const slider = document.getElementById(param);
+                const valueDisplay = document.getElementById(param + '-value');
+                
+                if (slider && valueDisplay) {
+                    slider.addEventListener('input', function() {
+                        valueDisplay.textContent = this.value;
+                    });
+                }
+            });
+            
+            // パラメータ適用
+            document.getElementById('apply-params').addEventListener('click', function() {
+                // 現在の検出手法に応じてdraw_polylineとmax_gapの値を決定
+                let drawPolyline = true;
+                let maxGap = 500;
+                if (currentDetectionMethod === 'distance_based') {
+                    drawPolyline = document.getElementById('draw-polyline').checked;
+                    maxGap = parseFloat(document.getElementById('max-gap').value);
+                } else if (currentDetectionMethod === 'split_merge') {
+                    drawPolyline = document.getElementById('draw-polyline-sm').checked;
+                    maxGap = parseFloat(document.getElementById('max-gap-sm').value);
+                }
+
+                const params = {
+                    max_gap: maxGap,
+                    min_wall_points: parseInt(document.getElementById('min-wall-points').value),
+                    max_linearity: parseFloat(document.getElementById('max-linearity').value),
+                    draw_polyline: drawPolyline,
+                    split_epsilon: parseFloat(document.getElementById('split-epsilon').value),
+                    min_segment_length: parseFloat(document.getElementById('min-segment-length').value),
+                    use_adaptive: document.getElementById('use-adaptive').checked,
+                    use_2d_optimization: document.getElementById('use-2d-optimization').checked,
+                    ransac_threshold: parseFloat(document.getElementById('ransac-threshold').value),
+                    min_inlier_ratio: parseFloat(document.getElementById('min-inlier-ratio').value),
+                    max_trials: parseInt(document.getElementById('max-trials').value),
+                    early_stop_ratio: parseFloat(document.getElementById('early-stop-ratio').value),
+                    window_size: parseInt(document.getElementById('window-size').value),
+                    window_stride: parseInt(document.getElementById('window-stride').value),
+                    overlap_threshold: parseFloat(document.getElementById('overlap-threshold').value),
+                    confidence_threshold: parseFloat(document.getElementById('confidence-threshold').value)
+                };
+                
+                fetch('/update_parameters', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(params)
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        console.log('Parameters updated successfully');
+                    }
+                });
+            });
+            
+            // デバッグ情報更新関数
+            function updateDebugInfo() {
+                const debugDisplay = document.getElementById('debug-display');
+                if (debugDisplay.style.display === 'block') {
+                    fetch('/debug_detection')
+                    .then(response => response.json())
+                    .then(data => {
+                        let debugText = '';
+                        
+                        if (data.enabled) {
+                            debugText = `検出手法: ${data.method}
+入力点数: ${data.input_points}
+除外点数: ${data.ignored_points || 0}
+検出セグメント数: ${data.segments_found}
+処理時間: ${data.processing_time_ms?.toFixed(2) || 'N/A'}ms
+
+パラメータ:`;
+                            
+                            // パラメータを動的に表示
+                            if (data.parameters) {
+                                for (const [key, value] of Object.entries(data.parameters)) {
+                                    debugText += `
+- ${key}: ${value}`;
+                                }
+                            }
+                        } else {
+                            debugText = data.message || data.error || '検出が無効です';
+                        }
+                        
+                        debugDisplay.textContent = debugText;
+                    })
+                    .catch(error => console.error('Error updating debug info:', error));
+                }
+            }
+            
+            // デバッグ情報表示トグル
+            document.getElementById('debug-info').addEventListener('click', function() {
+                const debugDisplay = document.getElementById('debug-display');
+                if (debugDisplay.style.display === 'block') {
+                    debugDisplay.style.display = 'none';
+                } else {
+                    debugDisplay.style.display = 'block';
+                    updateDebugInfo(); // 表示時に情報を更新
+                }
+            });
+            
+            // 検出手法に応じてパラメータ表示を切り替え
+            function updateParameterVisibility(method) {
+                const maxGapParam = document.getElementById('max-gap-param');
+                const minWallPointsParam = document.getElementById('min-wall-points-param');
+                const maxLinearityParam = document.getElementById('max-linearity-param');
+                const distanceBasedParams = document.getElementById('distance-based-params');
+                const splitMergeParams = document.getElementById('split-merge-params');
+                const ransacParams = document.getElementById('ransac-params');
+                const slidingParams = document.getElementById('sliding-params');
+                const hybridParams = document.getElementById('hybrid-params');
+
+                // 全てのパラメータグループを一旦非表示
+                distanceBasedParams.style.display = 'none';
+                splitMergeParams.style.display = 'none';
+                ransacParams.style.display = 'none';
+                slidingParams.style.display = 'none';
+                hybridParams.style.display = 'none';
+
+                // 基本パラメータの表示制御
+                // max_gap: DISTANCE_BASEDで使用
+                if (method === 'distance_based') {
+                    maxGapParam.style.display = 'block';
+                    distanceBasedParams.style.display = 'block';
+                } else {
+                    maxGapParam.style.display = 'none';
+                }
+
+                // min_wall_points: 全手法で使用
+                minWallPointsParam.style.display = 'block';
+
+                // max_linearity: 全手法で使用（distance_basedでは0で全領域検出）
+                maxLinearityParam.style.display = 'block';
+
+                // Split-Merge関連パラメータ
+                if (method === 'split_merge' || method === 'hybrid') {
+                    splitMergeParams.style.display = 'block';
+                }
+
+                // RANSAC関連パラメータ
+                if (method === 'ransac' || method === 'hybrid') {
+                    ransacParams.style.display = 'block';
+                }
+
+                // Sliding Window関連パラメータ
+                if (method === 'sliding_window') {
+                    slidingParams.style.display = 'block';
+                    ransacParams.style.display = 'block'; // Sliding WindowはRANSACも使用
+                }
+
+                // Hybrid固有パラメータ
+                if (method === 'hybrid') {
+                    hybridParams.style.display = 'block';
+                }
+                
+                // 壁検出手法の表示更新
+                const methodDisplay = document.getElementById('wall-detection-method');
+                if (methodDisplay) {
+                    switch(method) {
+                        case 'distance_based':
+                            methodDisplay.textContent = '距離ベース手法使用';
+                            break;
+                        case 'split_merge':
+                            methodDisplay.textContent = 'Split&Merge手法使用';
+                            break;
+                        case 'ransac':
+                            methodDisplay.textContent = 'RANSAC手法使用';
+                            break;
+                        case 'hybrid':
+                            methodDisplay.textContent = 'ハイブリッド手法使用';
+                            break;
+                        case 'sliding_window':
+                            methodDisplay.textContent = 'Sliding Window手法使用';
+                            break;
+                        default:
+                            methodDisplay.textContent = '手法選択中';
+                    }
+                }
+            }
+            
+            // ズームスライダー
+            const zoomSlider = document.getElementById('zoom-slider');
+            const zoomValueDisplay = document.getElementById('zoom-value');
+            
+            zoomSlider.addEventListener('input', function() {
+                zoomLevel = this.value / 100;
+                zoomValueDisplay.textContent = this.value + '%';
+            });
+            
+            // データ取得（エラーハンドリングと初期化チェックを強化）
+            let fetchRetryCount = 0;
+            const maxRetries = 3;
+            
+            function fetchLidarData() {
+                fetch('/lidar_data')
+                    .then(response => {
+                        if (!response.ok) {
+                            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                        }
+                        return response.json();
+                    })
+                    .then(data => {
+                        // データの有効性をチェック
+                        if (!data.data_valid) {
+                            if (fetchRetryCount < maxRetries) {
+                                fetchRetryCount++;
+                                setTimeout(fetchLidarData, 500);  // 500ms後にリトライ
+                                return;
+                            }
+                        }
+                        
+                        fetchRetryCount = 0;  // 成功時にリセット
+                        
+                        lidarPoints = data.points || [];
+                        wallSegments = data.wall_segments || [];
+                        angleOffset = data.angle_offset || 0;  // 角度オフセットを取得
+                        detectionDetails = data.detection_details || [];  // 検出詳細情報を取得
+                        zoneRanges = data.zone_angles || [];  // ゾーン範囲情報を取得
+                        ignoreDistance = data.ignore_distance || 150;  // 除外距離を取得
+                        
+                        // 壁検出設定の更新
+                        if (data.walls_enabled !== undefined) {
+                            wallDetectionEnabled = data.walls_enabled;
+                            const toggleBtn = document.getElementById('toggle-detection');
+                            toggleBtn.textContent = wallDetectionEnabled ? '検出を無効化' : '検出を有効化';
+                            toggleBtn.style.backgroundColor = wallDetectionEnabled ? '#f44336' : '#4CAF50';
+                            document.getElementById('parameter-controls').style.display = 
+                                wallDetectionEnabled ? 'block' : 'none';
+                        }
+                        
+                        
+                        if (data.detection_method !== undefined) {
+                            currentDetectionMethod = data.detection_method;
+                            document.getElementById('detection-method').value = data.detection_method;
+                            updateParameterVisibility(data.detection_method);
+                        }
+                        
+                        // 統計更新
+                        document.getElementById('point-count').textContent = lidarPoints.length;
+                        document.getElementById('ignored-points').textContent =
+                            lidarPoints.filter(p => p.is_ignored).length;
+                        document.getElementById('ignore-distance').textContent = ignoreDistance;
+                        document.getElementById('wall-count').textContent = wallSegments.length;
+                        
+                        // 物体検出範囲内点数を計算（ゾーン別閾値以下の点）
+                        const minThreshold = Math.min(...zoneThresholds);  // 一度だけ計算
+                        const obstacleCount = lidarPoints.filter(p => p.range <= minThreshold).length;
+                        document.getElementById('obstacle-count').textContent = obstacleCount;
+                        
+                        // 各ゾーンの点群数と検出状態を表示
+                        updateZoneDetails(detectionDetails);
+                        
+                        // 描画処理を次のフレームで実行（パフォーマンス向上）
+                        requestAnimationFrame(() => {
+                            drawLidarData(lidarPoints, wallSegments);
+                        });
+                        
+                        // デバッグ情報が表示中の場合は更新
+                        updateDebugInfo();
+                    })
+                    .catch(error => {
+                        console.error('Error:', error);
+                        fetchRetryCount++;
+                        if (fetchRetryCount <= maxRetries) {
+                            setTimeout(fetchLidarData, 1000);  // 1秒後にリトライ
+                        } else {
+                            document.getElementById('zone-point-counts').textContent = 'サーバー接続エラー';
+                        }
+                    });
+            }
+            
+            // 描画関数
+            function drawLidarData(points, segments) {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                drawGrid();
+                drawStaticElements();  // 静的要素（ゾーン閾値線など）を描画
+                drawZones(detectionDetails);  // 検出詳細を引数として渡す
+                
+                const centerX = canvas.width / 2;
+                const centerY = canvas.height / 2;
+                
+                // 原点描画
+                ctx.beginPath();
+                ctx.arc(centerX, centerY, 5, 0, Math.PI * 2);
+                ctx.fillStyle = 'black';
+                ctx.fill();
+
+                // 除外範囲の円を描画
+                const scale = baseScale * zoomLevel;
+                const ignoreRadius = ignoreDistance * scale;
+                ctx.beginPath();
+                ctx.arc(centerX, centerY, ignoreRadius, 0, Math.PI * 2);
+                ctx.strokeStyle = '#808080';
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash([5, 5]);  // 破線
+                ctx.globalAlpha = 0.6;
+                ctx.stroke();
+                ctx.setLineDash([]);  // 破線をリセット
+                ctx.globalAlpha = 1.0;
+
+                // 常にポイントを描画
+                for (const point of points) {
+                    const scale = baseScale * zoomLevel;
+                    // Y座標を反転して、上が正、下が負になるようにする
+                    const x = centerX + point.x * scale;  // mm単位でそのまま使用
+                    const y = centerY - point.y * scale;  // mm単位、マイナスにして上下を反転
+                    
+                    if (point.range <= 20) {
+                        ctx.beginPath();
+                        ctx.arc(x, y, 2, 0, Math.PI * 2);
+                        ctx.fillStyle = '#999999';
+                        ctx.globalAlpha = 0.6;
+                        ctx.fill();
+                        continue;
+                    }
+
+                    // LIDAR_IGNORE_DISTANCE内の点は灰色で描画（検出対象外）
+                    if (point.is_ignored) {
+                        ctx.beginPath();
+                        ctx.arc(x, y, 2, 0, Math.PI * 2);
+                        ctx.fillStyle = '#808080';
+                        ctx.globalAlpha = 0.5;
+                        ctx.fill();
+                        continue;
+                    }
+
+                    // 距離による色分け（mm単位）
+                    const distance = point.range;  // mm単位
+                    let fillColor;
+                    
+                    if (distance < 1000) {  // 1000mm = 1m
+                        fillColor = `rgb(255, ${Math.floor(distance / 1000 * 200)}, 0)`;
+                    } else if (distance < 5000) {  // 5000mm = 5m
+                        const ratio = (distance - 1000) / 4000;
+                        fillColor = `rgb(${Math.floor(255 * (1 - ratio))}, 255, ${Math.floor(200 * ratio)})`;
+                    } else {
+                        const intensity = Math.min(1, (20000 - distance) / 10000);  // 20000mm = 20m
+                        fillColor = `rgb(0, ${Math.floor(100 * intensity)}, ${Math.floor(200 * intensity + 55)})`;
+                    }
+                    
+                    ctx.beginPath();
+                    ctx.arc(x, y, 2, 0, Math.PI * 2);
+                    ctx.fillStyle = fillColor;
+                    ctx.globalAlpha = 0.8;
+                    ctx.fill();
+                }
+                
+                // 壁セグメントを描画（showWallsがtrueの場合のみ）
+                if (showWalls && segments.length > 0) {
+                    ctx.globalAlpha = 1.0;
+                    for (let i = 0; i < segments.length; i++) {
+                        const segment = segments[i];
+                        const scale = baseScale * zoomLevel;
+
+                        // draw_polylineフラグに応じて描画方法を切り替え
+                        if (segment.draw_polyline === false) {
+                            // draw_polyline=falseの場合：始点と終点のみを接続（直線）
+                            const startX = centerX + segment.start.x * scale;
+                            const startY = centerY - segment.start.y * scale;
+                            const endX = centerX + segment.end.x * scale;
+                            const endY = centerY - segment.end.y * scale;
+
+                            ctx.beginPath();
+                            ctx.moveTo(startX, startY);
+                            ctx.lineTo(endX, endY);
+                            ctx.strokeStyle = '#00ff00';  // 明るい緑色
+                            ctx.lineWidth = 3;
+                            ctx.stroke();
+                        } else if (segment.points && segment.points.length > 1) {
+                            // draw_polyline=trueまたは未定義の場合：全点を繋いで描画（ポリライン）
+                            ctx.beginPath();
+                            // 最初の点に移動
+                            const firstPoint = segment.points[0];
+                            ctx.moveTo(
+                                centerX + firstPoint.x * scale,
+                                centerY - firstPoint.y * scale
+                            );
+
+                            // 残りの点を順番に繋ぐ
+                            for (let j = 1; j < segment.points.length; j++) {
+                                const point = segment.points[j];
+                                ctx.lineTo(
+                                    centerX + point.x * scale,
+                                    centerY - point.y * scale
+                                );
+                            }
+
+                            ctx.strokeStyle = '#00ff00';  // 明るい緑色
+                            ctx.lineWidth = 3;
+                            ctx.stroke();
+                        } else {
+                            // フォールバック：points配列がない場合は直線描画
+                            const startX = centerX + segment.start.x * scale;
+                            const startY = centerY - segment.start.y * scale;
+                            const endX = centerX + segment.end.x * scale;
+                            const endY = centerY - segment.end.y * scale;
+
+                            ctx.beginPath();
+                            ctx.moveTo(startX, startY);
+                            ctx.lineTo(endX, endY);
+                            ctx.strokeStyle = '#00ff00';  // 明るい緑色
+                            ctx.lineWidth = 3;
+                            ctx.stroke();
+                        }
+
+                        // セグメント情報（番号と端点）を描画
+                        if (showSegmentInfo) {
+                            const startX = centerX + segment.start.x * scale;
+                            const startY = centerY - segment.start.y * scale;
+                            const endX = centerX + segment.end.x * scale;
+                            const endY = centerY - segment.end.y * scale;
+
+                            // 始点（黒の円）
+                            ctx.beginPath();
+                            ctx.arc(startX, startY, 6, 0, Math.PI * 2);
+                            ctx.fillStyle = '#000000';
+                            ctx.fill();
+                            ctx.strokeStyle = '#ffffff';
+                            ctx.lineWidth = 2;
+                            ctx.stroke();
+
+                            // 終点（黒の円）
+                            ctx.beginPath();
+                            ctx.arc(endX, endY, 6, 0, Math.PI * 2);
+                            ctx.fillStyle = '#000000';
+                            ctx.fill();
+                            ctx.strokeStyle = '#ffffff';
+                            ctx.lineWidth = 2;
+                            ctx.stroke();
+
+                            // セグメント番号を中央に表示
+                            const midX = (startX + endX) / 2;
+                            const midY = (startY + endY) / 2;
+                            ctx.font = 'bold 16px Arial';
+                            ctx.fillStyle = '#ffffff';
+                            ctx.strokeStyle = '#000000';
+                            ctx.lineWidth = 3;
+                            const text = `#${i + 1}`;
+                            ctx.strokeText(text, midX - 10, midY - 10);
+                            ctx.fillText(text, midX - 10, midY - 10);
+                        }
+                    }
+                }
+
+                ctx.globalAlpha = 1.0;
+            }
+            
+            // グリッド描画
+            function drawGrid() {
+                const centerX = canvas.width / 2;
+                const centerY = canvas.height / 2;
+                const scale = baseScale * zoomLevel;
+                const gridSize = 5000 * scale; // 5000mm(5m)ごと
+                
+                ctx.strokeStyle = '#ddd';
+                ctx.lineWidth = 1;
+                
+                // グリッド線
+                for (let x = centerX % gridSize; x < canvas.width; x += gridSize) {
+                    ctx.beginPath();
+                    ctx.moveTo(x, 0);
+                    ctx.lineTo(x, canvas.height);
+                    ctx.stroke();
+                }
+                
+                for (let y = centerY % gridSize; y < canvas.height; y += gridSize) {
+                    ctx.beginPath();
+                    ctx.moveTo(0, y);
+                    ctx.lineTo(canvas.width, y);
+                    ctx.stroke();
+                }
+                
+                // 距離円
+                if (showDistanceCircles) {
+                    // ズームレベルに応じて距離円の間隔を決定
+                    let distanceStep;
+                    let maxDistance = 20000;  // 20000mm = 20m
+                    if (zoomLevel >= 2.0) {
+                        distanceStep = 500;     // 200%以上: 500mm間隔
+                        maxDistance = 10000;    // 表示範囲を10000mmまでに制限
+                    } else if (zoomLevel >= 1.0) {
+                        distanceStep = 1000;    // 100%以上: 1000mm(1m)間隔
+                    } else if (zoomLevel >= 0.5) {
+                        distanceStep = 2000;    // 50%以上: 2000mm(2m)間隔
+                    } else {
+                        distanceStep = 5000;    // 50%未満: 5000mm(5m)間隔
+                    }
+                    
+                    for (let radius = distanceStep; radius <= maxDistance; radius += distanceStep) {
+                        ctx.beginPath();
+                        ctx.arc(centerX, centerY, radius * scale, 0, Math.PI * 2);  // mm単位でそのまま使用
+                        ctx.strokeStyle = '#8bc34a';
+                        ctx.setLineDash([5, 5]);
+                        ctx.stroke();
+                        ctx.setLineDash([]);
+                        
+                        if (showLabels) {
+                            ctx.fillStyle = '#006064';
+                            const fontSize = Math.max(10, Math.min(16, 12 / zoomLevel));
+                            ctx.font = `${fontSize}px Arial`;
+                            ctx.textAlign = 'center';
+                            ctx.textBaseline = 'middle';
+                            const textOffset = Math.max(5, 5 / zoomLevel);
+                            
+                            // 距離ラベルの表示（mm単位）
+                            const distanceLabel = radius >= 1000 ? `${(radius/1000).toFixed(1)}m` : `${radius}mm`;
+                            ctx.fillText(distanceLabel, centerX + textOffset, centerY - radius * scale - textOffset);
+                        }
+                    }
+                    
+                    // LIDAR_MIN_DISTANCE範囲円（薄い灰色）
+                    const minRadius = 20 * scale;  // mm単位でそのまま使用
+                    if (minRadius > 0) {
+                        ctx.beginPath();
+                        ctx.arc(centerX, centerY, minRadius, 0, Math.PI * 2);
+                        ctx.strokeStyle = 'rgba(200, 200, 200, 0.6)';
+                        ctx.lineWidth = 2;
+                        ctx.setLineDash([]);
+                        ctx.stroke();
+                        
+                        if (showLabels && minRadius > 20) {
+                            ctx.fillStyle = 'rgba(150, 150, 150, 0.8)';
+                            ctx.font = '10px Arial';
+                            ctx.textAlign = 'center';
+                            ctx.textBaseline = 'middle';
+                            ctx.fillText('IGNORE', centerX, centerY - minRadius - 12);
+                            // 距離表示を円の上部に追加
+                            ctx.fillText('20mm', centerX, centerY - minRadius - 24);
+                        }
+                    }
+                    
+                }
+                
+                // 角度線（0度が右向き）
+                if (showAngleLines) {
+                    for (let angle = -135; angle <= 135; angle += 30) {
+                        // LiDARの座標系に合わせて角度を計算（角度オフセットを適用）
+                        const adjustedAngle = angle + angleOffset;
+                        const radian = adjustedAngle * Math.PI / 180;
+                        const lineLength = Math.min(15000 * scale, Math.min(centerX, centerY) * 0.8);  // 15000mm = 15m
+                        // X軸は右が正、Y軸は下が正の画像座標系で、LiDAR座標系を再現
+                        const endX = centerX + Math.cos(radian) * lineLength;
+                        const endY = centerY - Math.sin(radian) * lineLength;
+                        
+                        ctx.beginPath();
+                        ctx.moveTo(centerX, centerY);
+                        ctx.lineTo(endX, endY);
+                        ctx.strokeStyle = '#9c27b0';
+                        ctx.setLineDash([3, 3]);
+                        ctx.stroke();
+                        ctx.setLineDash([]);
+                        
+                        if (showLabels) {
+                            const labelDistance = Math.min(16000 * scale, Math.min(centerX, centerY) * 0.9);  // 16000mm = 16m
+                            const labelX = centerX + Math.cos(radian) * labelDistance;
+                            const labelY = centerY - Math.sin(radian) * labelDistance;
+                            
+                            ctx.fillStyle = '#4a148c';
+                            const fontSize = Math.max(10, Math.min(16, 12 / zoomLevel));
+                            ctx.font = `${fontSize}px Arial`;
+                            ctx.textAlign = 'center';
+                            ctx.textBaseline = 'middle';
+                            
+                            // 元の角度を表示
+                            ctx.fillText(`${angle}°`, labelX, labelY);
+                        }
+                    }
+                }
+            }
+            
+            // 静的要素描画関数（ゾーン閾値など、設定変更時のみ更新が必要）
+            function drawStaticElements() {
+                const centerX = canvas.width / 2;
+                const centerY = canvas.height / 2;
+                const scale = baseScale * zoomLevel;
+                
+                // ゾーン別距離閾値を点線で描画
+                const zoneAngles = [
+                    [-75, -45],   // RrLH: 左後方
+                    [-45, -15],   // FrLH: 左前方  
+                    [-15, 15],    // FrFR: 前方
+                    [15, 45],     // FrRH: 右前方
+                    [45, 75]      // RrRH: 右後方
+                ];
+                
+                // ゾーン描画の最適化：描画設定をまとめて行う
+                ctx.strokeStyle = '#000';
+                ctx.setLineDash([3, 6]);
+                ctx.lineWidth = 1;
+                
+                zoneThresholds.forEach((threshold, zoneIdx) => {
+                    if (threshold > 0 && zoneIdx < zoneAngles.length) {
+                        const radius = threshold * scale;
+                        const [startAngle, endAngle] = zoneAngles[zoneIdx];
+                        
+                        // 角度を度からラジアンに変換
+                        const startRad = (startAngle - 90) * Math.PI / 180;  // -90度で調整（上が0度になるように）
+                        const endRad = (endAngle - 90) * Math.PI / 180;
+                        
+                        // 点線の弧を描画
+                        ctx.beginPath();
+                        ctx.arc(centerX, centerY, radius, startRad, endRad);
+                        ctx.stroke();
+                        
+                        // ゾーン名と距離をラベルとして表示
+                        if (showLabels) {
+                            const midAngle = (startRad + endRad) / 2;
+                            const labelX = centerX + (radius + 20) * Math.cos(midAngle);
+                            const labelY = centerY + (radius + 20) * Math.sin(midAngle);
+                            
+                            ctx.fillStyle = '#000';
+                            ctx.font = '10px Arial';
+                            ctx.textAlign = 'center';
+                            ctx.textBaseline = 'middle';
+                            ctx.fillText(`Zone${zoneIdx}`, labelX, labelY - 8);
+                            ctx.fillText(`${threshold}mm`, labelX, labelY + 8);
+                        }
+                    }
+                });
+                
+                // 点線設定をリセット
+                ctx.setLineDash([]);
+            }
+
+            // 検出器のパラメータを取得してUIに反映する関数
+            function updateDetectorParameters() {
+                fetch('/get_detector_info')
+                    .then(response => response.json())
+                    .then(data => {
+                        // パラメータを更新
+                        if (data.parameters) {
+                            const params = data.parameters;
+                        // 共通パラメータ
+                        if (params.max_gap !== undefined) {
+                            document.getElementById('max-gap').value = params.max_gap;
+                            document.getElementById('max-gap-value').textContent = params.max_gap;
+                        }
+                        if (params.min_wall_points !== undefined) {
+                            document.getElementById('min-wall-points').value = params.min_wall_points;
+                            document.getElementById('min-wall-points-value').textContent = params.min_wall_points;
+                        }
+                        if (params.max_linearity !== undefined) {
+                            document.getElementById('max-linearity').value = params.max_linearity;
+                            document.getElementById('max-linearity-value').textContent = params.max_linearity;
+                        }
+
+                        // Distance-Based固有パラメータ
+                        if (params.draw_polyline !== undefined) {
+                            document.getElementById('draw-polyline').checked = params.draw_polyline;
+                            // Split-Merge用のチェックボックスも同期
+                            document.getElementById('draw-polyline-sm').checked = params.draw_polyline;
+                        }
+
+                        // Split-Merge固有パラメータ
+                        if (params.max_gap !== undefined) {
+                            // max_gapを両方のスライダーに設定
+                            document.getElementById('max-gap').value = params.max_gap;
+                            document.getElementById('max-gap-value').textContent = params.max_gap;
+                            document.getElementById('max-gap-sm').value = params.max_gap;
+                            document.getElementById('max-gap-sm-value').textContent = params.max_gap;
+                        }
+                        if (params.split_epsilon !== undefined) {
+                            document.getElementById('split-epsilon').value = params.split_epsilon;
+                            document.getElementById('split-epsilon-value').textContent = params.split_epsilon;
+                        }
+                        if (params.min_segment_length !== undefined) {
+                            document.getElementById('min-segment-length').value = params.min_segment_length;
+                            document.getElementById('min-segment-length-value').textContent = params.min_segment_length;
+                        }
+                        if (params.use_adaptive !== undefined) {
+                            document.getElementById('use-adaptive').checked = params.use_adaptive;
+                        }
+                        if (params.use_2d_optimization !== undefined) {
+                            document.getElementById('use-2d-optimization').checked = params.use_2d_optimization;
+                        }
+                        
+                        // RANSAC固有パラメータ
+                        if (params.ransac_threshold !== undefined) {
+                            document.getElementById('ransac-threshold').value = params.ransac_threshold;
+                            document.getElementById('ransac-threshold-value').textContent = params.ransac_threshold;
+                        }
+                        if (params.min_inlier_ratio !== undefined) {
+                            document.getElementById('min-inlier-ratio').value = params.min_inlier_ratio;
+                            document.getElementById('min-inlier-ratio-value').textContent = params.min_inlier_ratio;
+                        }
+                        if (params.max_trials !== undefined) {
+                            document.getElementById('max-trials').value = params.max_trials;
+                            document.getElementById('max-trials-value').textContent = params.max_trials;
+                        }
+                        if (params.early_stop_ratio !== undefined) {
+                            document.getElementById('early-stop-ratio').value = params.early_stop_ratio;
+                            document.getElementById('early-stop-ratio-value').textContent = params.early_stop_ratio;
+                        }
+                        
+                        // Sliding Window固有パラメータ
+                        if (params.window_size !== undefined) {
+                            document.getElementById('window-size').value = params.window_size;
+                            document.getElementById('window-size-value').textContent = params.window_size;
+                        }
+                        if (params.window_stride !== undefined) {
+                            document.getElementById('window-stride').value = params.window_stride;
+                            document.getElementById('window-stride-value').textContent = params.window_stride;
+                        }
+                        if (params.overlap_threshold !== undefined) {
+                            document.getElementById('overlap-threshold').value = params.overlap_threshold;
+                            document.getElementById('overlap-threshold-value').textContent = params.overlap_threshold;
+                        }
+                        
+                        // Hybrid固有パラメータ
+                        if (params.confidence_threshold !== undefined) {
+                            document.getElementById('confidence-threshold').value = params.confidence_threshold;
+                            document.getElementById('confidence-threshold-value').textContent = params.confidence_threshold;
+                        }
+                    }
+
+                    if (data.method) {
+                        currentDetectionMethod = data.method;
+                        document.getElementById('detection-method').value = data.method;
+                        updateParameterVisibility(data.method);
+                    }
+                })
+                .catch(error => console.error('Error fetching detector info:', error));
+            }
+
+            // 初期化時に検出器情報を取得
+            updateDetectorParameters();
+
+            // 各ゾーンの詳細情報を更新する関数
+            function updateZoneDetails(currentDetectionDetails) {
+                if (!currentDetectionDetails || currentDetectionDetails.length === 0) {
+                    document.getElementById('zone-point-counts').textContent = 'データなし';
+                    return;
+                }
+                
+                // 各ゾーンの点群数を表示
+                let pointCounts = [];
+                
+                currentDetectionDetails.forEach((zone, index) => {
+                    const zoneName = zone.name || `Zone${index}`;
+                    
+                    // Python側で計算された検出範囲内点数を使用
+                    const detectionRangePoints = zone.detection_range_points || 0;
+                    
+                    pointCounts.push(`${zoneName}:${detectionRangePoints}点`);
+                });
+                
+                document.getElementById('zone-point-counts').textContent = pointCounts.join(' | ');
+            }
+            
+            // ゾーンを描画する関数
+            function drawZones(currentDetectionDetails) {
+                if (!zoneRanges || zoneRanges.length === 0) return;
+                
+                const centerX = canvas.width / 2;
+                const centerY = canvas.height / 2;
+                const scale = baseScale * zoomLevel;
+                const maxRadius = Math.min(centerX, centerY) * 0.9;
+
+                ctx.save();
+                
+                zoneRanges.forEach((zone, index) => {
+                    // LiDAR座標系（左回り=CCW）からCanvas座標系（右回り=CW）への変換
+                    const lidarStart = zone.start_angle + angleOffset;
+                    const lidarEnd = zone.end_angle + angleOffset;
+                    
+                    // Canvas座標系では角度を反転し、開始と終了を入れ替える
+                    const canvasStartAngle = -lidarEnd * Math.PI / 180;
+                    const canvasEndAngle = -lidarStart * Math.PI / 180;
+                    
+                    // ゾーンの検出情報を取得
+                    const zoneDetection = currentDetectionDetails && currentDetectionDetails[index] ? currentDetectionDetails[index] : null;
+                    const colors = ['#ff6b6b', '#4ecdc4', '#45b7d1', '#96ceb4'];
+                    const baseColor = colors[index % colors.length];
+                    
+                    // デバッグ用：検出情報をコンソールに出力
+                    if (zoneDetection && zoneDetection.detected) {
+                        console.log(`Zone ${index} (${zone.name}): detected=${zoneDetection.detected}, total_points=${zoneDetection.total_points}`);
+                    }
+                    
+                    // 背景の薄い扇形を描画
+                    ctx.globalAlpha = 0.1;
+                    ctx.fillStyle = baseColor;
+                    ctx.beginPath();
+                    ctx.moveTo(centerX, centerY);
+                    ctx.arc(centerX, centerY, maxRadius, canvasStartAngle, canvasEndAngle, false);
+                    ctx.closePath();
+                    ctx.fill();
+                    
+                    // 検出があれば、検出範囲までの濃い扇形を描画
+                    if (zoneDetection && zoneDetection.detected) {
+                        // 検出されたポイントの距離を集計（Python側で計算済みの検出範囲内距離を使用）
+                        let detectedDistances = [];
+                        if (zoneDetection.detection_distances && zoneDetection.detection_distances.length > 0) {
+                            // Python側で既にフィルタリング済みの検出範囲内距離を使用
+                            detectedDistances = zoneDetection.detection_distances.slice();
+                        } else if (zoneDetection.distances && zoneDetection.distances.length > 0) {
+                            // フォールバック：従来の方法でフィルタリング
+                            const zoneThreshold = zoneThresholds[index] || 500;
+                            const filteredDistances = zoneDetection.distances.filter(d => d <= zoneThreshold);
+                            if (filteredDistances.length > 0) {
+                                detectedDistances = detectedDistances.concat(filteredDistances);
+                            }
+                        }
+                        
+                        if (detectedDistances.length > 0) {
+                            // 中央値を計算
+                            detectedDistances.sort((a, b) => a - b);
+                            const medianDistance = detectedDistances[Math.floor(detectedDistances.length / 2)];
+                            const detectionRadius = Math.min(medianDistance * scale, maxRadius);  // mm単位でそのまま使用
+                            
+                            const zoneThreshold = zoneThresholds[index] || 500;
+                            console.log(`Zone ${index}: medianDistance=${medianDistance.toFixed(1)}mm, detectionRadius=${detectionRadius.toFixed(1)}px, zoneThreshold=${zoneThreshold}mm`);
+                            
+                            // 検出範囲の扇形を濃い色で描画
+                            ctx.globalAlpha = 0.4;
+                            ctx.fillStyle = baseColor;
+                            ctx.beginPath();
+                            ctx.moveTo(centerX, centerY);
+                            ctx.arc(centerX, centerY, detectionRadius, canvasStartAngle, canvasEndAngle, false);
+                            ctx.closePath();
+                            ctx.fill();
+                            
+                            // 中央値を表示
+                            if (showLabels) {
+                                const midAngle = (canvasStartAngle + canvasEndAngle) / 2;
+                                const labelRadius = detectionRadius * 0.5;
+                                const labelX = centerX + Math.cos(midAngle) * labelRadius;
+                                const labelY = centerY + Math.sin(midAngle) * labelRadius;
+                                
+                                ctx.globalAlpha = 1.0;
+                                ctx.fillStyle = '#fff';
+                                ctx.fillRect(labelX - 25, labelY - 10, 50, 20);
+                                
+                                ctx.fillStyle = '#333';
+                                ctx.font = 'bold 12px Arial';
+                                ctx.textAlign = 'center';
+                                ctx.textBaseline = 'middle';
+                                ctx.fillText(`${medianDistance.toFixed(2)}m`, labelX, labelY);
+                            }
+                        }
+                    }
+                    
+                    // ゾーン名を表示
+                    if (showLabels) {
+                        const midAngle = (canvasStartAngle + canvasEndAngle) / 2;
+                        const labelRadius = maxRadius * 0.85;
+                        const labelX = centerX + Math.cos(midAngle) * labelRadius;
+                        const labelY = centerY + Math.sin(midAngle) * labelRadius;
+                        
+                        ctx.globalAlpha = 0.8;
+                        ctx.fillStyle = '#333';
+                        ctx.font = 'bold 14px Arial';
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        ctx.fillText(zone.name, labelX, labelY);
+                    }
+                });
+                
+                ctx.restore();
+            }
+            
+            // 定期更新（描画負荷を考慮して間隔を調整）
+            setInterval(fetchLidarData, 200);
+        });
+    </script>
+</body>
+</html>
+    

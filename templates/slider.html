@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Data monitor</title>
+  <style>
+    .main-container {
+      display: flex;
+      gap: 20px;
+    }
+    .image-section {
+      position: relative;
+      width: 800px;
+      height: 600px;
+      border: 1px solid #ccc;
+    }
+    #canvas-viewer {
+      width: 800px;
+      height: 600px;
+      background: #eee;
+    }
+    #no-image-label {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      font-weight: bold;
+      font-size: 24px;
+      display: none;
+    }
+    .controls {
+      margin-top: 10px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    #image-slider {
+      width: 200px;
+    }
+    .delete-range-form {
+      margin-top: 20px;
+      border: 1px solid #ccc;
+      padding: 10px;
+    }
+  </style>
+</head>
+<body>
+
+<!-- CSVファイル選択フォーム -->
+<form method="POST" style="margin-bottom:10px;">
+  <button type="submit">Choose CSV</button>
+  <select name="selected_csv"
+    onchange="document.getElementById('selectedFileName').textContent = this.value;">
+    {% for csv_file in csv_files %}
+      <option value="{{ csv_file }}"
+        {% if current_csv == csv_file %} selected {% endif %}
+      >{{ csv_file }}</option>
+    {% endfor %}
+  </select>
+</form>
+
+{% if current_csv %}
+  {% if image_files|length == 0 %}
+    <p>No rows found in this CSV.</p>
+  {% else %}
+    <div class="main-container">
+
+      <!-- 左カラム: Canvas + コントロール群 -->
+      <div>
+        <div class="image-section">
+          <canvas id="canvas-viewer" width="800" height="600"></canvas>
+          <span id="no-image-label">No image</span>
+        </div>
+
+        <div class="controls">
+          <span>Index: <span id="index-label">0</span></span>
+          <input type="range" id="image-slider"
+                 min="0" max="{{ image_files|length -1 }}"
+                 value="0" step="1"
+                 oninput="updateImage()">
+          <span id="current-filename"></span>
+
+          <button id="reverse-button" onclick="toggleReverse()">«</button>
+          <button id="play-button" onclick="togglePlay()">▶</button>
+
+          <label for="play-speed">Speed(fps):</label>
+          <select id="play-speed" onchange="changeSpeed()">
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="5">5</option>
+            <option value="10" selected>10</option>
+            <option value="15">15</option>
+            <option value="30">30</option>
+          </select>
+        </div>
+
+        <!-- Delete forms -->
+        <div class="delete-range-form">
+          <h4>Delete</h4>
+          <!-- Delete Current -->
+          <form id="delete-current-form" action="{{ url_for('delete_current') }}" method="POST" style="margin-bottom:10px;">
+            <input type="hidden" name="csvfile" value="{{ current_csv }}">
+            <input type="hidden" name="current_index" id="current-index-input" value="0">
+            <button type="submit">Delete Current</button>
+          </form>
+          <!-- Delete Range -->
+          <form action="{{ url_for('delete_range') }}" method="POST">
+            <input type="hidden" name="csvfile" value="{{ current_csv }}">
+            <label>Start Index: <input type="number" name="start_index" style="width:60px;"></label>
+            <label>End Index: <input type="number" name="end_index" style="width:60px;"></label>
+            <button type="submit">Delete Range</button>
+          </form>
+        </div>
+
+        <!-- 動画作成機能: start/end で一気にCanvasを描画→録画 -->
+        <div style="margin-top:10px; border:1px solid #ccc; padding:10px;">
+          <h4>Make Video</h4>
+          <label>Video Start:</label>
+          <input type="number" id="video-start-idx" style="width:60px;" min="0" value="0">
+          <label>End:</label>
+          <input type="number" id="video-end-idx" style="width:60px;" min="0" value="0">
+          <button onclick="recordVideo()">録画開始</button>
+        </div>
+      </div>
+
+      <!-- 右カラム: メタ情報など -->
+      <div style="display:flex; flex-direction:column; gap:10px;">
+        <div style="border:1px solid #ccc; padding:10px;">
+          <p><strong>timestamp:</strong> <span id="info-timestamp"></span></p>
+          <p><strong>mode:</strong> <span id="info-mode"></span></p>
+          <p><strong>steering:</strong> <span id="info-steering"></span></p>
+          <p><strong>throttle:</strong> <span id="info-throttle"></span></p>
+        </div>
+        <div style="border:1px solid #ccc; padding:10px;">
+          <h3>Other Sensors</h3>
+          <div id="other-sensors"></div>
+        </div>
+      </div>
+    </div><!-- end main-container -->
+
+    <script>
+      // Canvas, context
+      const canvas = document.getElementById("canvas-viewer");
+      const ctx = canvas.getContext("2d");
+      const noImageLabel = document.getElementById("no-image-label");
+
+      // HTML要素
+      const slider = document.getElementById("image-slider");
+      const indexLabel = document.getElementById("index-label");
+      const currentFilenameSpan = document.getElementById("current-filename");
+      const infoTimestamp = document.getElementById("info-timestamp");
+      const infoMode = document.getElementById("info-mode");
+      const infoSteering = document.getElementById("info-steering");
+      const infoThrottle = document.getElementById("info-throttle");
+      const otherSensorsDiv = document.getElementById("other-sensors");
+      const deleteCurrentForm = document.getElementById("delete-current-form");
+      const currentIndexInput = document.getElementById("current-index-input");
+
+      // サーバー提供データ
+      const imageFiles = {{ image_files|tojson }};
+      const metadata = {{ metadata|tojson }};
+
+      // 再生関連
+      let isPlaying=false;
+      let isReverse=false;
+      let playIntervalId=null;
+      let intervalMs=100; // default 10fps => 100ms
+      let currentIndex=0;
+
+      // 動画録画用
+      let recordSessionId=null;
+      let isRecording=false;
+
+      window.onload=()=>{
+        slider.value=0;
+        updateImage();
+      };
+
+      function updateImage(){
+        currentIndex=parseInt(slider.value);
+        indexLabel.textContent=currentIndex;
+        currentIndexInput.value=currentIndex;
+        const currentFile=imageFiles[currentIndex];
+        currentFilenameSpan.textContent=currentFile;
+
+        const rowData=metadata[currentFile]||{};
+        infoTimestamp.textContent=rowData["timestamp"]??"N/A";
+        infoMode.textContent=rowData["mode"]??"N/A";
+        infoSteering.textContent=rowData["steering"]??"N/A";
+        infoThrottle.textContent=rowData["throttle"]??"N/A";
+
+        // Other sensors
+        let html="";
+        for(let [key,val] of Object.entries(rowData)){
+          if(["timestamp","mode","steering","throttle","image_file"].includes(key)) continue;
+          html+=`<p><strong>${key}</strong>: ${val}</p>`;
+        }
+        otherSensorsDiv.innerHTML=html;
+
+        if(currentFile.startsWith("no_image_")){
+          noImageLabel.style.display="block";
+          ctx.clearRect(0,0,canvas.width,canvas.height);
+        }else{
+          noImageLabel.style.display="none";
+          drawCanvasImageAndCircle(currentFile,rowData);
+        }
+      }
+
+      function drawCanvasImageAndCircle(filename,rowData){
+        let img=new Image();
+        img.onload=()=>{
+          ctx.clearRect(0,0,canvas.width,canvas.height);
+          ctx.drawImage(img,0,0,canvas.width,canvas.height);
+
+          let mode=rowData["mode"]??"auto";
+          let color=(mode==="user")?"green":"blue";
+
+          let base=filename.replace(/\.[^.]*$/,"");
+          let parts=base.split("_");
+          if(parts.length>=3){
+            let x=parseInt(parts[parts.length-2]);
+            let y=parseInt(parts[parts.length-1]);
+            if(!isNaN(x)&&!isNaN(y)){
+              let scaleX=canvas.width/img.naturalWidth;
+              let scaleY=canvas.height/img.naturalHeight;
+              let scaledX=x*scaleX;
+              let scaledY=y*scaleY;
+              let radius=6*Math.min(scaleX,scaleY);
+
+              ctx.strokeStyle=color;
+              ctx.lineWidth=6;
+              ctx.beginPath();
+              ctx.arc(scaledX,scaledY,radius,0,2*Math.PI);
+              ctx.stroke();
+            }
+          }
+        };
+        img.src="/images/"+filename;
+      }
+
+      // 再生速度
+      function changeSpeed(){
+        const speed=parseInt(document.getElementById("play-speed").value);
+        intervalMs=1000/speed;
+        if(isPlaying){
+          stopPlay();
+          startPlay();
+        }
+      }
+
+      // 順再生
+      function togglePlay(){
+        if(!isPlaying){
+          isReverse=false;
+          startPlay();
+          document.getElementById("play-button").textContent="❚❚";
+        } else{
+          stopPlay();
+          document.getElementById("play-button").textContent="▶";
+        }
+      }
+
+      // 逆再生
+      function toggleReverse(){
+        if(!isPlaying){
+          isReverse=true;
+          startPlay();
+          document.getElementById("reverse-button").textContent="❚❚";
+        } else {
+          stopPlay();
+          document.getElementById("reverse-button").textContent="«";
+        }
+      }
+
+      function startPlay(){
+        isPlaying=true;
+        playIntervalId=setInterval(()=>{
+          if(!isReverse){
+            currentIndex++;
+            if(currentIndex>=imageFiles.length){
+              stopPlay();
+              document.getElementById("play-button").textContent="▶";
+              return;
+            }
+          } else {
+            currentIndex--;
+            if(currentIndex<0){
+              stopPlay();
+              document.getElementById("reverse-button").textContent="«";
+              return;
+            }
+          }
+          slider.value=currentIndex;
+          updateImage();
+        },intervalMs);
+      }
+
+      function stopPlay(){
+        isPlaying=false;
+        isReverse=false;
+        if(playIntervalId){
+          clearInterval(playIntervalId);
+          playIntervalId=null;
+        }
+        document.getElementById("play-button").textContent="▶";
+        document.getElementById("reverse-button").textContent="«";
+      }
+
+      // -----------------------------------------
+      // 動画作成: start~endを自動でCanvas描画→アップロード
+      // -----------------------------------------
+      function recordVideo(){
+        let startIdx = parseInt(document.getElementById("video-start-idx").value);
+        let endIdx = parseInt(document.getElementById("video-end-idx").value);
+        if(isNaN(startIdx)||isNaN(endIdx)||
+           startIdx<0||endIdx>=imageFiles.length||startIdx>endIdx){
+          alert("Invalid start/end index");
+          return;
+        }
+        fetch("/start_recording",{method:"POST"})
+          .then(r=>r.json())
+          .then(data=>{
+            recordSessionId=data.session_id;
+            isRecording=true;
+            console.log("recording session_id:", recordSessionId);
+            recordFrames(startIdx,endIdx);
+          });
+      }
+
+      function recordFrames(startIdx,endIdx){
+        let i=startIdx;
+        function processNext(){
+          if(i> endIdx){
+            // finish
+            finishRecording();
+            return;
+          }
+          slider.value=i;
+          updateImage();
+          // Canvas描画が終わるまで少し待機
+          setTimeout(()=>{
+            uploadFrame(()=>{
+              i++;
+              processNext();
+            });
+          },100);
+        }
+        processNext();
+      }
+
+      function uploadFrame(cb){
+        if(!isRecording||!recordSessionId){
+          if(cb)cb();
+          return;
+        }
+        // Canvas => dataURL
+        let dataURL=canvas.toDataURL("image/png");
+        let fd=new FormData();
+        fd.append("session_id", recordSessionId);
+        fd.append("frame_data", dataURL);
+        fetch("/upload_frame",{method:"POST",body:fd})
+          .then(r=>r.text())
+          .then(txt=>{
+            console.log("frame uploaded:", txt);
+            if(cb)cb();
+          });
+      }
+
+      function finishRecording(){
+        isRecording=false;
+        let fd=new FormData();
+        fd.append("session_id", recordSessionId);
+        // fps => current "play-speed"
+        let speed=document.getElementById("play-speed").value;
+        fd.append("fps", speed);
+        fetch("/finish_recording",{method:"POST", body:fd})
+          .then(async res=>{
+            if(res.status===200){
+              let blob=await res.blob();
+              let url=URL.createObjectURL(blob);
+              let a=document.createElement("a");
+              a.href=url;
+              a.download="recorded.mp4";
+              a.click();
+              URL.revokeObjectURL(url);
+              console.log("Video downloaded");
+            } else{
+              console.error("finishRecording error", await res.text());
+            }
+            recordSessionId=null;
+          });
+      }
+    </script>
+
+  {% endif %}
+{% else %}
+  <p>No CSV selected yet.</p>
+{% endif %}
+
+</body>
+</html>

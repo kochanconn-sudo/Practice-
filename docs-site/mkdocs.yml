@@ -1,0 +1,94 @@
+site_name: togikaidrive 講座
+site_description: 自動運転ミニカーで学ぶ「認知→判断→操作」
+site_url: https://autonomous-minicar-battle.github.io/togikaidrive-site/
+
+
+theme:
+  name: material
+  language: ja
+  palette:
+    - scheme: default
+      primary: blue
+      accent: orange
+      toggle:
+        icon: material/brightness-7
+        name: ダークモードに切り替え
+    - scheme: slate
+      primary: blue
+      accent: orange
+      toggle:
+        icon: material/brightness-4
+        name: ライトモードに切り替え
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.highlight
+    - content.code.copy
+
+plugins:
+  - search:
+      lang: ja
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.arithmatex:
+      generic: true
+  - tables
+  - attr_list
+  - md_in_html
+
+extra_javascript:
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+
+nav:
+  - " ホーム": index.md
+  - " ミニカー製作": minicar-build.md
+  - " 環境構築": setup.md
+  - " ハンズオン": handson.md
+  - " コース": course.md
+  - " 基本確認":
+    - " プログラム全体像": basics/program-overview.md
+    - " センサー": basics/sensors.md
+    - " モーター": basics/motor.md
+    - " コントローラー": basics/controllers.md
+    - " パラメータ設定": basics/config.md
+  - " 体験型授業":
+    - " 概要": lesson/overview.md
+    - " 認知": lesson/recognition.md
+    - " 判断": lesson/decision.md
+    - " 操作": lesson/control.md
+  - " 演習":
+    - " チキンレース": exercises/chicken-race.md
+    - " 独自ルール作成": exercises/custom-rules.md
+    - " PID制御": exercises/pid-control.md
+    - " 機械学習": exercises/machine-learning.md
+  - " 発展":
+    - " YOLO物体検知": advanced/yolo.md
+    - " LiDAR統合": advanced/lidar.md
+    - " Follow the Gap": advanced/follow-the-gap.md
+    - " ROS2対応": advanced/ros2.md
+  - " 関連プロジェクト": projects.md
+  - " 開発者向け情報":
+    - " TensorRT/OpenVINO": reference/inference.md
+    - " PWMマッピング": reference/pwm-mapping.md
+    - " カメラ調整": reference/camera.md
+    - " 色空間の注意事項": dev/color-space.md
+    - " GStreamer最適化": dev/gstreamer.md
+    - " WiFi設定": reference/wifi-setup.md

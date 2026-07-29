@@ -1,0 +1,17 @@
+# OLED IP Address Display Service
+# Installation: bash setup/ip_address_display/install_oled_service.sh
+
+[Unit]
+Description=OLED IP Address Display
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+ExecStart=__SCRIPT_DIR__/oled_ip_display.sh
+RemainAfterExit=yes
+WorkingDirectory=__SCRIPT_DIR__
+
+[Install]
+WantedBy=multi-user.target

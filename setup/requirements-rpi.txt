@@ -1,0 +1,50 @@
+# Requirements for Raspberry Pi 4/5
+# Python 3.11+ recommended
+
+# Web Framework
+flask==3.0.3
+markupsafe==2.1.5
+tornado==6.4.1
+
+# GPIO and Hardware Control
+gpiozero==2.0.1
+lgpio==0.2.2.0
+RPi.GPIO==0.7.1
+Adafruit-PCA9685==1.0.1
+smbus2==0.4.3
+pmw3901==0.1.0
+pyserial==3.5
+
+# Computer Vision
+opencv-contrib-python==4.10.0.84
+
+# Data Processing
+numpy==1.26.4
+pandas==2.2.3
+scipy==1.14.1
+matplotlib==3.9.2
+
+# Machine Learning (ARM64 optimized)
+torch==2.3.1 #Note: Raspberry Pi 4 (Cortex-A72, ARMv8.0) requires torch<=2.3.1
+torchvision>=0.15.0,<=0.18.1
+timm>=1.0.0
+#torch==2.4.1 
+#torchvision==0.19.1
+onnx==1.16.2
+onnxruntime==1.19.2
+
+# YOLO Object Detection
+ultralytics>=8.3.0  # YOLOv8/v11 support with ONNX/TensorRT export
+ultralytics-thop>=2.0.18  # FLOPs calculation for YOLO models
+polars>=1.0.0  # Fast DataFrame library (ultralytics dependency)
+
+# Game Controller
+pygame==2.6.1
+
+# Utilities
+prettytable==3.11.0
+pillow==10.4.0
+
+# Sensor Libraries (optional based on hardware)
+# adafruit-circuitpython-bno055==5.4.10
+# adafruit-circuitpython-mpu6050==1.2.7

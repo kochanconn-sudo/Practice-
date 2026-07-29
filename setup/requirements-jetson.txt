@@ -1,0 +1,101 @@
+# Requirements for Jetson Orin Nano
+# Python 3.8+ recommended
+# Note: Some packages may need to be installed from NVIDIA sources
+
+# Web Framework
+flask==2.3.3
+markupsafe==2.1.3
+tornado==6.4.1
+
+# Jetson GPIO (NVIDIA's RPi.GPIO compatible library)
+Jetson.GPIO==2.1.6
+## JetPack6.2で利用するには下記を参照しGPIOの設定が必要です。
+## https://github.com/FaBoPlatform/FaBo/tree/master/0608_donkeycar/JetsonGPIO/ai_car_board?fbclid=IwY2xjawLpckRleHRuA2FlbQIxMABicmlkETEyV1FwWmk1QW43VVZPUVJVAR6mKb3nYsdJiSh3OjXZSvvMnmPMwTvqIG1SrE6GfHOQz6b5_nrl003nSTB8lw_aem_lG001OPTrFbT4PRGqPDMUg
+
+
+# Hardware Control
+Adafruit-PCA9685==1.0.1
+smbus==1.1.post2
+pmw3901==0.1.0
+pyserial==3.5
+
+# Computer Vision
+# IMPORTANT: Use system OpenCV with GStreamer support for CSI cameras
+# Do NOT install opencv-python from pip - it lacks GStreamer support
+#
+# To use system OpenCV in virtualenv:
+# 1. Remove any pip-installed OpenCV: pip uninstall opencv-python opencv-contrib-python
+# 2. Create symlink to system OpenCV:
+#    ln -s /usr/lib/python3.10/dist-packages/cv2 /path/to/venv/lib/python3.10/site-packages/cv2
+# 3. Verify GStreamer support:
+#    python -c "import cv2; print(cv2.__version__); print(cv2.getBuildInformation())" | grep GStreamer
+#
+# System OpenCV on Jetson typically has version 4.8.0 with GStreamer support
+
+# Data Processing
+numpy<2.0,>=1.24.3
+pandas==2.0.3
+scipy==1.10.1
+matplotlib==3.7.2
+
+# Machine Learning - NVIDIA optimized versions
+# PyTorch for Jetson: Install from NVIDIA wheels
+# https://forums.developer.nvidia.com/t/pytorch-for-jetson
+#
+# Installation commands:
+# 1. Install PyTorch:
+# pip3 install --no-cache https://developer.download.nvidia.com/compute/redist/jp/v61/pytorch/torch-2.5.0a0+872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl
+#
+# 2. Install cuSPARSELt (optional, for sparse operations):
+# export TORCH_CUDA_ARCH_LIST="7.2;8.7"  # For Orin Nano
+# pip3 install --no-cache https://developer.download.nvidia.com/compute/redist/jp/v61/pytorch/cusparselt-0.6.2.post3-cp310-cp310-linux_aarch64.whl
+#
+# 3. Install torchvision from source (for version 0.20):
+# sudo apt-get install libjpeg-dev zlib1g-dev libpython3-dev libopenblas-dev libavcodec-dev libavformat-dev libswscale-dev
+# git clone --branch release/0.20 https://github.com/pytorch/vision torchvision
+# cd torchvision
+# export BUILD_VERSION=0.20.0
+# python3 setup.py install --user  # remove --user if installing in virtualenv
+#
+# Note: torch and torchvision must be installed separately using the above commands
+# torch==2.5.0a0+872d972e41.nv24.08.17622132  # Do not install via pip, use NVIDIA wheel
+# torchvision==0.20.0  # Install from source using instructions above
+# torchaudio==2.5.0  # May also need to be built from source for compatibility
+
+timm>=1.0.0
+
+# ONNX Runtime for Jetson
+onnx==1.14.1
+onnxruntime>=1.23.0  # CPU version for ONNX model inference (YOLO, etc.)
+# onnxruntime-gpu==1.15.1  # GPU version (Install from NVIDIA sources if needed)
+
+# YOLO Object Detection
+ultralytics>=8.3.0  # YOLOv8/v11 support with ONNX/TensorRT export
+ultralytics-thop>=2.0.18  # FLOPs calculation for YOLO models
+polars>=1.0.0  # Fast DataFrame library (ultralytics dependency)
+# Note: Install ultralytics with --no-deps if there are dependency conflicts with system packages
+
+# TensorRT (usually pre-installed on Jetson)
+# pycuda==2022.2.2
+# tensorrt  # Version depends on JetPack
+
+# Game Controller
+pygame==2.5.1
+
+# Utilities
+prettytable==3.8.0
+pillow==10.0.0
+
+# CUDA-accelerated libraries (optional)
+# cupy-cuda12x==13.0.0  # For CUDA 12.x
+# numba==0.58.0
+
+# Sensor Libraries (optional based on hardware)
+# adafruit-circuitpython-bno055==5.4.10
+# adafruit-circuitpython-mpu6050==1.2.7
+
+# OLED Display (smbus + Pillow で動作、追加ライブラリ不要)
+# adafruit-circuitpython-ssd1306==2.12.15
+
+# Performance monitoring
+# jetson-stats==4.2.3  # jtop for monitoring
