@@ -5,61 +5,49 @@ perception.py
 
 センサーフュージョン用の認識モジュール。
 
-役割:
-    超音波センサー
-    カメラ
-    YOLOなどの物体検出
-    将来的なLiDAR
+役割
+----
+超音波:
+    実距離・安全確認
 
-から得られた情報を統合し、
+カメラ:
+    壁・コーナー・コース形状・障害物候補
 
-    ・左右の壁
-    ・前方の壁
-    ・障害物
-    ・コーナー
-    ・行き止まり
-    ・コース中央からのずれ
-    ・壁の角度
-    ・危険度
-    ・推奨速度
-    ・推奨ステアリング
+YOLO:
+    物体種別・障害物情報
 
-などの「走行判断に使いやすい情報」に変換する。
+LiDAR:
+    将来の全周距離・空間認識
 
-このファイルは、
-「センサーから情報を作るところ」と
-「その情報を使って実際に走るところ」
-を分離するための中間層として使用する。
+これらを統合して、planner.py が利用しやすい
+共通の PerceptionResult を生成する。
 
-今後の想定:
+設計方針
+--------
+camera.py
+    ↓
+camera_wall_detector.py
+    ↓
+perception.py
+    ↓
+planner.py
+    ↓
+control / motor
 
-    ultrasonic.py
-          │
-    camera.py
-          │
-      YOLO
-          │
-       LiDAR
-          │
-          ▼
-    perception.py
-          │
-          ▼
-      planner.py
-          │
-          ▼
-      controller
-          │
-          ▼
-        motor
+注意
+----
+このファイルはモーターPWMを直接出力しない。
+-1.0～1.0の操舵
+0.0～1.0の速度
+など、plannerが利用しやすい抽象値を扱う。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
-import math
 import logging
+import math
 import time
 
 import numpy as np
@@ -74,33 +62,40 @@ logger = logging.getLogger(__name__)
 # 共通ユーティリティ
 # ============================================================
 
-def clamp(value: float, minimum: float, maximum: float) -> float:
-    """
-    数値をminimum〜maximumの範囲に収める。
-    """
-    return max(minimum, min(maximum, value))
+def clamp(
+    value: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    return max(
+        minimum,
+        min(maximum, value),
+    )
 
 
-def safe_float(value: Any, default: float = 0.0) -> float:
-    """
-    数値変換を安全に行う。
-
-    Noneや文字列などが来てもエラーにせず、
-    defaultを返す。
-    """
+def safe_float(
+    value: Any,
+    default: float = 0.0,
+) -> float:
     if value is None:
         return default
 
     try:
-        return float(value)
+        result = float(value)
+
+        if not math.isfinite(result):
+            return default
+
+        return result
+
     except (TypeError, ValueError):
         return default
 
 
-def safe_bool(value: Any, default: bool = False) -> bool:
-    """
-    真偽値を安全に取得する。
-    """
+def safe_bool(
+    value: Any,
+    default: bool = False,
+) -> bool:
     if value is None:
         return default
 
@@ -108,12 +103,12 @@ def safe_bool(value: Any, default: bool = False) -> bool:
         return value
 
     if isinstance(value, str):
-        value_lower = value.lower()
+        value = value.lower().strip()
 
-        if value_lower in ("true", "1", "yes", "on"):
+        if value in ("true", "1", "yes", "on"):
             return True
 
-        if value_lower in ("false", "0", "no", "off"):
+        if value in ("false", "0", "no", "off"):
             return False
 
     try:
@@ -124,16 +119,17 @@ def safe_bool(value: Any, default: bool = False) -> bool:
 
 def get_config(
     name: str,
-    default: Any = None
+    default: Any = None,
 ) -> Any:
-    """
-    config.py / config_hanson.pyから安全に設定値を取得する。
-    """
-    return getattr(config, name, default)
+    return getattr(
+        config,
+        name,
+        default,
+    )
 
 
 # ============================================================
-# センサー名の定義
+# 超音波センサー名
 # ============================================================
 
 ULTRASONIC_LEFT_KEYS = (
@@ -161,15 +157,11 @@ ULTRASONIC_RIGHT_KEYS = (
 
 
 # ============================================================
-# 壁情報
+# 壁状態
 # ============================================================
 
 @dataclass
 class WallState:
-    """
-    左右および前方の壁の認識結果。
-    """
-
     left_detected: bool = False
     front_detected: bool = False
     right_detected: bool = False
@@ -187,15 +179,11 @@ class WallState:
 
 
 # ============================================================
-# 障害物情報
+# 障害物状態
 # ============================================================
 
 @dataclass
 class ObstacleState:
-    """
-    障害物の認識結果。
-    """
-
     detected: bool = False
 
     left: bool = False
@@ -210,8 +198,9 @@ class ObstacleState:
 
     source: str = "none"
 
-    # YOLOなどから得られる詳細情報
-    detections: List[Dict[str, Any]] = field(default_factory=list)
+    detections: List[Dict[str, Any]] = field(
+        default_factory=list
+    )
 
 
 # ============================================================
@@ -220,38 +209,28 @@ class ObstacleState:
 
 @dataclass
 class CourseState:
-    """
-    コースの形状に関する推定結果。
-    """
-
     # -1.0 = 左
-    #  0.0 = 中央
+    #  0.0 = 直進
     # +1.0 = 右
     direction: float = 0.0
 
-    # 左右のどちらが広いか
     left_open: bool = False
     right_open: bool = False
 
-    # 左右の空き具合
+    # 0～1
     left_free_space: float = 0.0
     right_free_space: float = 0.0
 
-    # コーナー情報
+    # -1～1
+    center_offset: float = 0.0
+
+    estimated_width: Optional[float] = None
+
     corner_detected: bool = False
     corner_direction: Optional[str] = None
 
-    # 行き止まり
-    dead_end: bool = False
-
-    # 交差点
     intersection: bool = False
-
-    # コース中央からのずれ
-    center_offset: float = 0.0
-
-    # コース幅の推定
-    estimated_width: Optional[float] = None
+    dead_end: bool = False
 
 
 # ============================================================
@@ -260,10 +239,6 @@ class CourseState:
 
 @dataclass
 class SafetyState:
-    """
-    安全性に関する統合結果。
-    """
-
     emergency: bool = False
 
     danger_level: float = 0.0
@@ -271,37 +246,24 @@ class SafetyState:
     collision_risk: float = 0.0
 
     must_slow_down: bool = False
-
     must_stop: bool = False
 
     escape_direction: Optional[str] = None
 
 
 # ============================================================
-# 走行推奨値
+# 走行推奨
 # ============================================================
 
 @dataclass
 class DrivingRecommendation:
-    """
-    perceptionがplannerへ渡す推奨値。
-
-    ここでは最終的なモーターPWMを決めない。
-
-    あくまで
-        「どちらへ行きたいか」
-        「どれくらい危険か」
-        「どれくらい減速すべきか」
-    を表現する。
-    """
-
-    # -1.0 = 左
-    #  0.0 = 直進
-    # +1.0 = 右
+    # -1 = 左
+    #  0 = 直進
+    # +1 = 右
     steering: float = 0.0
 
-    # 0.0 = 停止
-    # 1.0 = 最大
+    # 0 = 停止
+    # 1 = 最大
     throttle: float = 0.0
 
     confidence: float = 0.0
@@ -310,157 +272,333 @@ class DrivingRecommendation:
 
 
 # ============================================================
-# 最終認識結果
+# 最終結果
 # ============================================================
 
 @dataclass
 class PerceptionResult:
-    """
-    perception.pyが最終的に生成するデータ。
+    timestamp: float = field(
+        default_factory=time.perf_counter
+    )
 
-    planner.pyは基本的にこのデータだけを見れば、
-    カメラや超音波の生データを直接扱わなくてもよい構成を目指す。
-    """
+    wall: WallState = field(
+        default_factory=WallState
+    )
 
-    timestamp: float = field(default_factory=time.perf_counter)
+    obstacle: ObstacleState = field(
+        default_factory=ObstacleState
+    )
 
-    # 壁
-    wall: WallState = field(default_factory=WallState)
+    course: CourseState = field(
+        default_factory=CourseState
+    )
 
-    # 障害物
-    obstacle: ObstacleState = field(default_factory=ObstacleState)
+    safety: SafetyState = field(
+        default_factory=SafetyState
+    )
 
-    # コース
-    course: CourseState = field(default_factory=CourseState)
-
-    # 安全
-    safety: SafetyState = field(default_factory=SafetyState)
-
-    # 推奨値
     recommendation: DrivingRecommendation = field(
         default_factory=DrivingRecommendation
     )
 
-    # 元センサーデータ
-    ultrasonic_raw: Dict[str, Any] = field(default_factory=dict)
+    ultrasonic_raw: Dict[str, Any] = field(
+        default_factory=dict
+    )
 
-    # カメラから得られた情報
-    camera_raw: Dict[str, Any] = field(default_factory=dict)
+    camera_raw: Dict[str, Any] = field(
+        default_factory=dict
+    )
 
-    # LiDARから得られた情報
-    lidar_raw: Dict[str, Any] = field(default_factory=dict)
+    lidar_raw: Dict[str, Any] = field(
+        default_factory=dict
+    )
 
-    # YOLO等の認識結果
-    vision_raw: Dict[str, Any] = field(default_factory=dict)
+    vision_raw: Dict[str, Any] = field(
+        default_factory=dict
+    )
 
-    # デバッグ用
-    debug: Dict[str, Any] = field(default_factory=dict)
+    debug: Dict[str, Any] = field(
+        default_factory=dict
+    )
 
 
 # ============================================================
-# Perception本体
+# Perception
 # ============================================================
 
 class Perception:
-    """
-    センサーフュージョンの中心クラス。
-
-    入力:
-        ultrasonic_data
-        camera_data
-        lidar_data
-        yolo_data
-
-    出力:
-        PerceptionResult
-
-    今後、
-
-        ultrasonic
-        camera
-        YOLO
-        LiDAR
-        AI
-
-    を追加しても、planner.py側はできるだけ変更しない
-    ことを目的とする。
-    """
 
     def __init__(self):
-        # 前回結果
+        # ----------------------------------------------------
+        # 状態
+        # ----------------------------------------------------
+
         self.result = PerceptionResult()
 
-        # 前回の認識時間
-        self.last_update_time = time.perf_counter()
-
-        # フレーム番号
-        self.frame_count = 0
-
-        # 認識状態
         self.initialized = False
 
-        # 平滑化用の履歴
-        self._left_distance_history: List[float] = []
-        self._front_distance_history: List[float] = []
-        self._right_distance_history: List[float] = []
+        self.frame_count = 0
 
-        # 最大履歴数
-        self.history_size = int(
-            get_config(
-                "PERCEPTION_HISTORY_SIZE",
-                5
-            )
+        self.last_update_time = (
+            time.perf_counter()
         )
 
-        # センサー値が異常だった場合の安全値
+        # ----------------------------------------------------
+        # 距離履歴
+        # ----------------------------------------------------
+
+        self.history_size = max(
+            1,
+            int(
+                get_config(
+                    "PERCEPTION_HISTORY_SIZE",
+                    3,
+                )
+            ),
+        )
+
+        self._left_distance_history = []
+        self._front_distance_history = []
+        self._right_distance_history = []
+
+        # ----------------------------------------------------
+        # 方向履歴
+        # ----------------------------------------------------
+
+        self._direction_history = []
+
+        # ----------------------------------------------------
+        # 基本距離設定
+        # ----------------------------------------------------
+
         self.default_distance = float(
             get_config(
                 "PERCEPTION_DEFAULT_DISTANCE",
-                3000.0
+                3000.0,
             )
         )
 
-        # 壁検出距離
         self.wall_detection_distance = float(
             get_config(
                 "PERCEPTION_WALL_DETECTION_RANGE",
                 get_config(
                     "DETECTION_RANGE",
-                    1000.0
-                )
+                    150.0,
+                ),
             )
         )
 
-        # 障害物判定距離
-        self.obstacle_detection_distance = float(
+        # 側面壁として扱う距離
+        self.side_wall_detection_distance = float(
             get_config(
-                "PERCEPTION_OBSTACLE_DISTANCE",
-                get_config(
-                    "DETECTION_RANGE",
-                    500.0
-                )
+                "PERCEPTION_SIDE_WALL_RANGE",
+                max(
+                    500.0,
+                    get_config(
+                        "RIGHT_LEFT_RANGE",
+                        400.0,
+                    ),
+                ),
             )
         )
 
-        # 非常停止距離
+        # 前方危険判定
+        self.front_warning_distance = float(
+            get_config(
+                "PERCEPTION_FRONT_WARNING_DISTANCE",
+                600.0,
+            )
+        )
+
+        # 緊急停止
         self.emergency_distance = float(
             get_config(
                 "PERCEPTION_EMERGENCY_DISTANCE",
                 get_config(
                     "STOP_RANGE",
-                    150.0
-                )
+                    250.0,
+                ),
             )
         )
 
-        logger.info("Perception 起動")
+        # ----------------------------------------------------
+        # 空き具合
+        # ----------------------------------------------------
+
+        self.free_space_reference = float(
+            get_config(
+                "PERCEPTION_FREE_SPACE_REFERENCE",
+                1500.0,
+            )
+        )
+
+        if self.free_space_reference <= 0:
+            self.free_space_reference = 1500.0
+
+        # 重要:
+        # left_free_space/right_free_space は0～1なので、
+        # GAP_MARGINも0～1で扱う。
+        self.gap_margin = clamp(
+            float(
+                get_config(
+                    "PERCEPTION_GAP_MARGIN",
+                    0.10,
+                )
+            ),
+            0.0,
+            1.0,
+        )
+
+        # ----------------------------------------------------
+        # カメラ
+        # ----------------------------------------------------
+
+        self.camera_confidence_threshold = clamp(
+            float(
+                get_config(
+                    "PERCEPTION_CAMERA_CONFIDENCE_THRESHOLD",
+                    0.60,
+                )
+            ),
+            0.0,
+            1.0,
+        )
+
+        self.camera_direction_weight = clamp(
+            float(
+                get_config(
+                    "PERCEPTION_CAMERA_DIRECTION_WEIGHT",
+                    0.45,
+                )
+            ),
+            0.0,
+            1.0,
+        )
+
+        # ----------------------------------------------------
+        # コーナー
+        # ----------------------------------------------------
+
+        self.corner_front_distance = float(
+            get_config(
+                "PERCEPTION_CORNER_FRONT_DISTANCE",
+                700.0,
+            )
+        )
+
+        self.corner_side_difference = float(
+            get_config(
+                "PERCEPTION_CORNER_SIDE_DIFFERENCE",
+                150.0,
+            )
+        )
+
+        # ----------------------------------------------------
+        # 障害物
+        # ----------------------------------------------------
+
+        # 超音波の側面センサーだけでは
+        # 「壁」と「障害物」を区別しない。
+        #
+        # よって、
+        #   左右 = 壁 / 空間
+        #   前方 = 衝突危険
+        #
+        # と分離する。
+        self.obstacle_confidence_threshold = clamp(
+            float(
+                get_config(
+                    "PERCEPTION_OBSTACLE_CONFIDENCE_THRESHOLD",
+                    0.60,
+                )
+            ),
+            0.0,
+            1.0,
+        )
+
+        # ----------------------------------------------------
+        # 速度
+        # ----------------------------------------------------
+
+        self.base_throttle = clamp(
+            float(
+                get_config(
+                    "PERCEPTION_BASE_THROTTLE",
+                    get_config(
+                        "FORWARD_STRAIGHT",
+                        0.8,
+                    ),
+                )
+            ),
+            0.0,
+            1.0,
+        )
+
+        self.minimum_throttle = clamp(
+            float(
+                get_config(
+                    "PERCEPTION_MIN_THROTTLE",
+                    0.20,
+                )
+            ),
+            0.0,
+            1.0,
+        )
+
+        self.maximum_throttle = clamp(
+            float(
+                get_config(
+                    "PERCEPTION_MAX_THROTTLE",
+                    1.0,
+                )
+            ),
+            0.0,
+            1.0,
+        )
+
+        # ----------------------------------------------------
+        # 推奨ステアリング
+        # ----------------------------------------------------
+
+        self.obstacle_steering_gain = clamp(
+            float(
+                get_config(
+                    "PERCEPTION_OBSTACLE_STEERING_GAIN",
+                    0.75,
+                )
+            ),
+            0.0,
+            1.0,
+        )
+
+        self.corner_steering_gain = clamp(
+            float(
+                get_config(
+                    "PERCEPTION_CORNER_STEERING_GAIN",
+                    0.75,
+                )
+            ),
+            0.0,
+            1.0,
+        )
+
+        # ----------------------------------------------------
+        # デバッグ
+        # ----------------------------------------------------
+
         logger.info(
-            "wall_detection_distance=%.1f, "
-            "obstacle_detection_distance=%.1f, "
-            "emergency_distance=%.1f",
+            "Perception 起動"
+        )
+
+        logger.info(
+            "PERCEPTION settings: "
+            "wall=%s side_wall=%s front_warning=%s "
+            "emergency=%s gap_margin=%.2f",
             self.wall_detection_distance,
-            self.obstacle_detection_distance,
+            self.side_wall_detection_distance,
+            self.front_warning_distance,
             self.emergency_distance,
+            self.gap_margin,
         )
 
     # ========================================================
@@ -469,38 +607,29 @@ class Perception:
 
     def update(
         self,
-        ultrasonic_data: Optional[Dict[str, Any]] = None,
-        camera_data: Optional[Dict[str, Any]] = None,
-        lidar_data: Optional[Dict[str, Any]] = None,
-        yolo_data: Optional[Dict[str, Any]] = None,
+        ultrasonic_data: Optional[
+            Dict[str, Any]
+        ] = None,
+        camera_data: Optional[
+            Dict[str, Any]
+        ] = None,
+        lidar_data: Optional[
+            Dict[str, Any]
+        ] = None,
+        yolo_data: Optional[
+            Dict[str, Any]
+        ] = None,
     ) -> PerceptionResult:
-        """
-        センサー情報を統合してPerceptionResultを生成する。
-
-        Parameters
-        ----------
-        ultrasonic_data:
-            超音波センサーの生データ。
-
-        camera_data:
-            カメラ画像から抽出した認識情報。
-
-        lidar_data:
-            LiDARから得られた認識情報。
-
-        yolo_data:
-            YOLOなどの物体検出結果。
-
-        Returns
-        -------
-        PerceptionResult
-        """
 
         self.frame_count += 1
 
         now = time.perf_counter()
 
-        dt = now - self.last_update_time
+        dt = (
+            now
+            -
+            self.last_update_time
+        )
 
         if dt <= 0:
             dt = 1e-6
@@ -508,45 +637,66 @@ class Perception:
         self.last_update_time = now
 
         # ----------------------------------------------------
-        # 入力を安全に正規化
+        # None対策
         # ----------------------------------------------------
 
-        if ultrasonic_data is None:
-            ultrasonic_data = {}
+        ultrasonic_data = (
+            ultrasonic_data
+            if ultrasonic_data is not None
+            else {}
+        )
 
-        if camera_data is None:
-            camera_data = {}
+        camera_data = (
+            camera_data
+            if camera_data is not None
+            else {}
+        )
 
-        if lidar_data is None:
-            lidar_data = {}
+        lidar_data = (
+            lidar_data
+            if lidar_data is not None
+            else {}
+        )
 
-        if yolo_data is None:
-            yolo_data = {}
+        yolo_data = (
+            yolo_data
+            if yolo_data is not None
+            else {}
+        )
 
         # ----------------------------------------------------
-        # 超音波距離抽出
+        # カメラ/YOLO標準化
+        # ----------------------------------------------------
+
+        camera_data = self.normalize_camera_data(
+            camera_data
+        )
+
+        yolo_data = self.normalize_yolo_data(
+            yolo_data
+        )
+
+        # ----------------------------------------------------
+        # 超音波距離
         # ----------------------------------------------------
 
         left_distance = self._extract_distance(
             ultrasonic_data,
             ULTRASONIC_LEFT_KEYS,
-            default=self.default_distance,
         )
 
         front_distance = self._extract_distance(
             ultrasonic_data,
             ULTRASONIC_FRONT_KEYS,
-            default=self.default_distance,
         )
 
         right_distance = self._extract_distance(
             ultrasonic_data,
             ULTRASONIC_RIGHT_KEYS,
-            default=self.default_distance,
         )
 
         # ----------------------------------------------------
-        # 履歴更新
+        # 履歴
         # ----------------------------------------------------
 
         self._append_history(
@@ -565,136 +715,134 @@ class Perception:
         )
 
         # ----------------------------------------------------
-        # 平滑化値
+        # 平滑化
         # ----------------------------------------------------
 
-        left_filtered = self._get_filtered_distance(
+        left_distance = self._get_filtered_distance(
             self._left_distance_history,
             left_distance,
         )
 
-        front_filtered = self._get_filtered_distance(
+        front_distance = self._get_filtered_distance(
             self._front_distance_history,
             front_distance,
         )
 
-        right_filtered = self._get_filtered_distance(
+        right_distance = self._get_filtered_distance(
             self._right_distance_history,
             right_distance,
         )
 
         # ----------------------------------------------------
-        # 壁状態の初期生成
+        # WallState
         # ----------------------------------------------------
 
-        wall_state = WallState(
-            left_distance=left_filtered,
-            front_distance=front_filtered,
-            right_distance=right_filtered,
-        )
-
-        # ----------------------------------------------------
-        # 超音波から壁を判定
-        # ----------------------------------------------------
-
-        wall_state.left_detected = (
-            left_filtered <= self.wall_detection_distance
-        )
-
-        wall_state.front_detected = (
-            front_filtered <= self.wall_detection_distance
-        )
-
-        wall_state.right_detected = (
-            right_filtered <= self.wall_detection_distance
-        )
-
-        # ----------------------------------------------------
-        # 超音波から障害物を仮判定
-        # ----------------------------------------------------
-
-        obstacle_state = self._detect_obstacle_from_ultrasonic(
-            left_filtered,
-            front_filtered,
-            right_filtered,
-        )
-
-        # ----------------------------------------------------
-        # カメラ情報との統合
-        # ----------------------------------------------------
-
-        wall_state = self._fuse_camera_wall_information(
-            wall_state,
+        wall = self._build_wall_state(
+            left_distance,
+            front_distance,
+            right_distance,
             camera_data,
         )
 
-        obstacle_state = self._fuse_camera_obstacle_information(
-            obstacle_state,
+        # ----------------------------------------------------
+        # 障害物
+        # ----------------------------------------------------
+
+        obstacle = self._build_obstacle_state(
+            front_distance,
+            left_distance,
+            right_distance,
             camera_data,
             yolo_data,
         )
 
         # ----------------------------------------------------
-        # コース状態
+        # コース
         # ----------------------------------------------------
 
-        course_state = self._analyze_course(
-            wall_state=wall_state,
-            obstacle_state=obstacle_state,
+        course = self._analyze_course(
+            wall_state=wall,
+            obstacle_state=obstacle,
             camera_data=camera_data,
             lidar_data=lidar_data,
         )
 
         # ----------------------------------------------------
-        # 安全状態
+        # 安全
         # ----------------------------------------------------
 
-        safety_state = self._analyze_safety(
-            wall_state=wall_state,
-            obstacle_state=obstacle_state,
-            course_state=course_state,
+        safety = self._analyze_safety(
+            wall_state=wall,
+            obstacle_state=obstacle,
+            course_state=course,
         )
 
         # ----------------------------------------------------
-        # 推奨走行
+        # 推奨
         # ----------------------------------------------------
 
-        recommendation = self._calculate_recommendation(
-            wall_state=wall_state,
-            obstacle_state=obstacle_state,
-            course_state=course_state,
-            safety_state=safety_state,
+        recommendation = (
+            self._calculate_recommendation(
+                wall_state=wall,
+                obstacle_state=obstacle,
+                course_state=course,
+                safety_state=safety,
+            )
         )
 
         # ----------------------------------------------------
-        # 結果生成
+        # 結果
         # ----------------------------------------------------
 
         self.result = PerceptionResult(
             timestamp=time.perf_counter(),
 
-            wall=wall_state,
+            wall=wall,
 
-            obstacle=obstacle_state,
+            obstacle=obstacle,
 
-            course=course_state,
+            course=course,
 
-            safety=safety_state,
+            safety=safety,
 
             recommendation=recommendation,
 
-            ultrasonic_raw=dict(ultrasonic_data),
+            ultrasonic_raw=dict(
+                ultrasonic_data
+            ),
 
-            camera_raw=dict(camera_data),
+            camera_raw=dict(
+                camera_data
+            ),
 
-            lidar_raw=dict(lidar_data),
+            lidar_raw=dict(
+                lidar_data
+            ),
 
-            vision_raw=dict(yolo_data),
+            vision_raw=dict(
+                yolo_data
+            ),
 
             debug={
-                "frame_count": self.frame_count,
-                "dt": dt,
-                "fps": 1.0 / dt,
+                "frame_count":
+                    self.frame_count,
+
+                "dt":
+                    dt,
+
+                "fps":
+                    1.0 / dt,
+
+                "camera_active":
+                    bool(camera_data),
+
+                "yolo_active":
+                    bool(
+                        yolo_data.get(
+                            "detections",
+                            [],
+                        )
+                    ),
             },
         )
 
@@ -703,43 +851,32 @@ class Perception:
         return self.result
 
     # ========================================================
-    # 超音波値抽出
+    # 距離抽出
     # ========================================================
 
     def _extract_distance(
         self,
         data: Dict[str, Any],
         possible_keys: Tuple[str, ...],
-        default: float,
     ) -> float:
-        """
-        複数の候補キーから距離を取得する。
-        """
 
         for key in possible_keys:
 
             if key not in data:
                 continue
 
-            value = data[key]
-
-            if value is None:
-                continue
-
             value = safe_float(
-                value,
-                default,
+                data[key],
+                self.default_distance,
             )
 
-            if value < 0:
-                continue
+            if value >= 0:
+                return value
 
-            return value
-
-        return default
+        return self.default_distance
 
     # ========================================================
-    # 履歴管理
+    # 履歴
     # ========================================================
 
     def _append_history(
@@ -747,11 +884,10 @@ class Perception:
         history: List[float],
         value: float,
     ) -> None:
-        """
-        履歴に値を追加。
-        """
 
-        history.append(value)
+        history.append(
+            value
+        )
 
         if len(history) > self.history_size:
             del history[0]
@@ -765,140 +901,91 @@ class Perception:
         history: List[float],
         current: float,
     ) -> float:
-        """
-        移動平均による簡易平滑化。
-
-        今後ここを
-            median filter
-            EMA
-            Kalman filter
-        に変更できる構造にしてある。
-        """
 
         if not history:
             return current
 
-        valid_values = [
-            value
-            for value in history
-            if value is not None and math.isfinite(value)
+        values = [
+            x
+            for x in history
+            if x is not None
+            and math.isfinite(x)
+            and x >= 0
         ]
 
-        if not valid_values:
+        if not values:
             return current
 
+        # 履歴を短くして応答性優先
         return float(
-            np.mean(valid_values)
+            np.mean(
+                values
+            )
         )
 
     # ========================================================
-    # 超音波による障害物検出
+    # 壁状態
     # ========================================================
 
-    def _detect_obstacle_from_ultrasonic(
+    def _build_wall_state(
         self,
         left_distance: float,
         front_distance: float,
         right_distance: float,
-    ) -> ObstacleState:
-        """
-        超音波だけを使った障害物判定。
-
-        カメラやYOLOが無くても最低限の安全機能として動く。
-        """
-
-        obstacle = ObstacleState(
-            source="ultrasonic"
-        )
-
-        left_close = (
-            left_distance <= self.obstacle_detection_distance
-        )
-
-        front_close = (
-            front_distance <= self.obstacle_detection_distance
-        )
-
-        right_close = (
-            right_distance <= self.obstacle_detection_distance
-        )
-
-        obstacle.left = left_close
-        obstacle.center = front_close
-        obstacle.right = right_close
-
-        obstacle.detected = (
-            left_close
-            or front_close
-            or right_close
-        )
-
-        if obstacle.detected:
-
-            close_distances = []
-
-            if left_close:
-                close_distances.append(left_distance)
-
-            if front_close:
-                close_distances.append(front_distance)
-
-            if right_close:
-                close_distances.append(right_distance)
-
-            if close_distances:
-                obstacle.distance = min(
-                    close_distances
-                )
-
-        return obstacle
-
-    # ========================================================
-    # カメラ壁情報との統合
-    # ========================================================
-
-    def _fuse_camera_wall_information(
-        self,
-        wall_state: WallState,
         camera_data: Dict[str, Any],
     ) -> WallState:
-        """
-        カメラから得られた壁情報を超音波情報に追加する。
 
-        camera_dataの想定例:
+        wall = WallState()
 
-        {
-            "left_wall": True,
-            "right_wall": True,
-            "front_wall": False,
+        wall.left_distance = left_distance
+        wall.front_distance = front_distance
+        wall.right_distance = right_distance
 
-            "left_confidence": 0.9,
-            "right_confidence": 0.8,
-            "front_confidence": 0.7,
+        # ----------------------------------------------------
+        # 左右壁
+        #
+        # 左右センサーは壁追従用の距離として扱う。
+        # ----------------------------------------------------
 
-            "left_angle": 0.1,
-            "right_angle": -0.05
-        }
-
-        この段階では
-        「カメラの判断を全面的に信用する」
-        のではなく、
-        confidenceに応じて統合する。
-        """
-
-        if not camera_data:
-            return wall_state
-
-        left_camera = camera_data.get(
-            "left_wall"
+        wall.left_detected = (
+            left_distance
+            <= self.side_wall_detection_distance
         )
 
-        right_camera = camera_data.get(
-            "right_wall"
+        wall.right_detected = (
+            right_distance
+            <= self.side_wall_detection_distance
         )
 
-        front_camera = camera_data.get(
-            "front_wall"
+        # 前方は「壁/障害物が近い」
+        wall.front_detected = (
+            front_distance
+            <= self.front_warning_distance
+        )
+
+        # ----------------------------------------------------
+        # カメラの壁判定を統合
+        # ----------------------------------------------------
+
+        left_camera = safe_bool(
+            camera_data.get(
+                "left_wall",
+                False,
+            )
+        )
+
+        right_camera = safe_bool(
+            camera_data.get(
+                "right_wall",
+                False,
+            )
+        )
+
+        front_camera = safe_bool(
+            camera_data.get(
+                "front_wall",
+                False,
+            )
         )
 
         left_confidence = clamp(
@@ -937,148 +1024,295 @@ class Perception:
             1.0,
         )
 
-        # カメラの信頼度が一定以上なら反映
-        camera_threshold = float(
-            get_config(
-                "PERCEPTION_CAMERA_CONFIDENCE_THRESHOLD",
-                0.60,
-            )
-        )
+        if (
+            left_camera
+            and left_confidence
+            >= self.camera_confidence_threshold
+        ):
+            wall.left_detected = True
 
         if (
-            safe_bool(left_camera)
-            and left_confidence >= camera_threshold
+            right_camera
+            and right_confidence
+            >= self.camera_confidence_threshold
         ):
-            wall_state.left_detected = True
+            wall.right_detected = True
 
         if (
-            safe_bool(right_camera)
-            and right_confidence >= camera_threshold
+            front_camera
+            and front_confidence
+            >= self.camera_confidence_threshold
         ):
-            wall_state.right_detected = True
+            wall.front_detected = True
 
-        if (
-            safe_bool(front_camera)
-            and front_confidence >= camera_threshold
-        ):
-            wall_state.front_detected = True
-
-        # 壁角度
-        if "left_angle" in camera_data:
-            wall_state.left_angle = safe_float(
-                camera_data["left_angle"],
-                wall_state.left_angle,
-            )
-
-        if "right_angle" in camera_data:
-            wall_state.right_angle = safe_float(
-                camera_data["right_angle"],
-                wall_state.right_angle,
-            )
-
-        wall_state.left_confidence = max(
-            wall_state.left_confidence,
+        wall.left_confidence = max(
+            self._distance_confidence(
+                left_distance,
+                self.side_wall_detection_distance,
+            ),
             left_confidence,
         )
 
-        wall_state.right_confidence = max(
-            wall_state.right_confidence,
+        wall.right_confidence = max(
+            self._distance_confidence(
+                right_distance,
+                self.side_wall_detection_distance,
+            ),
             right_confidence,
         )
 
-        wall_state.front_confidence = max(
-            wall_state.front_confidence,
+        wall.front_confidence = max(
+            self._distance_confidence(
+                front_distance,
+                self.front_warning_distance,
+            ),
             front_confidence,
         )
 
-        return wall_state
+        # カメラ角度
+        wall.left_angle = safe_float(
+            camera_data.get(
+                "left_angle",
+                0.0,
+            ),
+            0.0,
+        )
+
+        wall.right_angle = safe_float(
+            camera_data.get(
+                "right_angle",
+                0.0,
+            ),
+            0.0,
+        )
+
+        return wall
 
     # ========================================================
-    # カメラ・YOLO障害物情報との統合
+    # 距離信頼度
     # ========================================================
 
-    def _fuse_camera_obstacle_information(
+    def _distance_confidence(
         self,
-        obstacle_state: ObstacleState,
+        distance: float,
+        reference: float,
+    ) -> float:
+
+        if reference <= 0:
+            return 0.0
+
+        # 近すぎず遠すぎない範囲で信頼度を高める
+        ratio = clamp(
+            1.0
+            -
+            abs(
+                distance
+                -
+                reference * 0.45
+            )
+            /
+            max(
+                1.0,
+                reference,
+            ),
+            0.0,
+            1.0,
+        )
+
+        return ratio
+
+    # ========================================================
+    # 障害物状態
+    # ========================================================
+
+    def _build_obstacle_state(
+        self,
+        front_distance: float,
+        left_distance: float,
+        right_distance: float,
         camera_data: Dict[str, Any],
         yolo_data: Dict[str, Any],
     ) -> ObstacleState:
-        """
-        カメラやYOLOの障害物情報を統合する。
-        """
 
-        if camera_data:
+        obstacle = ObstacleState()
 
-            if safe_bool(
+        # ----------------------------------------------------
+        # 前方超音波
+        #
+        # ここでは「障害物確定」ではなく
+        # 衝突危険候補として扱う。
+        # ----------------------------------------------------
+
+        front_close = (
+            front_distance
+            <= self.front_warning_distance
+        )
+
+        # 緊急レベルなら center=True
+        if (
+            front_distance
+            <= self.emergency_distance
+        ):
+            obstacle.center = True
+            obstacle.detected = True
+            obstacle.distance = front_distance
+            obstacle.source = "ultrasonic"
+            obstacle.confidence = 1.0
+
+        # ----------------------------------------------------
+        # カメラ障害物
+        # ----------------------------------------------------
+
+        camera_obstacle = safe_bool(
+            camera_data.get(
+                "obstacle",
+                False,
+            )
+        )
+
+        camera_obstacle_confidence = clamp(
+            safe_float(
                 camera_data.get(
-                    "obstacle",
-                    False,
-                )
-            ):
-                obstacle_state.detected = True
+                    "obstacle_confidence",
+                    0.0,
+                ),
+                0.0,
+            ),
+            0.0,
+            1.0,
+        )
 
-                obstacle_state.source = (
-                    "camera"
-                )
+        if (
+            camera_obstacle
+            and
+            camera_obstacle_confidence
+            >= self.obstacle_confidence_threshold
+        ):
 
-                obstacle_state.confidence = max(
-                    obstacle_state.confidence,
+            obstacle.detected = True
+
+            obstacle.source = "camera"
+
+            obstacle.confidence = max(
+                obstacle.confidence,
+                camera_obstacle_confidence,
+            )
+
+            obstacle.object_type = (
+                camera_data.get(
+                    "obstacle_type"
+                )
+            )
+
+            # カメラの位置情報があれば利用
+            obstacle_side = camera_data.get(
+                "obstacle_side"
+            )
+
+            if obstacle_side == "left":
+                obstacle.left = True
+
+            elif obstacle_side == "right":
+                obstacle.right = True
+
+            else:
+                obstacle.center = True
+
+        # ----------------------------------------------------
+        # YOLO
+        # ----------------------------------------------------
+
+        detections = yolo_data.get(
+            "detections",
+            [],
+        )
+
+        if isinstance(
+            detections,
+            list,
+        ) and detections:
+
+            max_confidence = 0.0
+
+            best_detection = None
+
+            for detection in detections:
+
+                if not isinstance(
+                    detection,
+                    dict,
+                ):
+                    continue
+
+                confidence = clamp(
                     safe_float(
-                        camera_data.get(
-                            "obstacle_confidence",
+                        detection.get(
+                            "confidence",
                             0.0,
                         ),
                         0.0,
                     ),
+                    0.0,
+                    1.0,
                 )
 
-        if yolo_data:
+                if confidence > max_confidence:
 
-            detections = yolo_data.get(
-                "detections",
-                []
-            )
+                    max_confidence = confidence
 
-            if isinstance(
-                detections,
-                list,
-            ):
+                    best_detection = detection
 
-                if detections:
+            if best_detection is not None:
 
-                    obstacle_state.detected = True
+                obstacle.detected = True
 
-                    obstacle_state.source = (
-                        "yolo"
+                obstacle.source = "yolo"
+
+                obstacle.confidence = max(
+                    obstacle.confidence,
+                    max_confidence,
+                )
+
+                obstacle.object_type = (
+                    best_detection.get(
+                        "class_name",
+                        best_detection.get(
+                            "class",
+                            "unknown",
+                        ),
                     )
+                )
 
-                    obstacle_state.detections = (
-                        detections
-                    )
+                x_center = safe_float(
+                    best_detection.get(
+                        "x_center",
+                        0.5,
+                    ),
+                    0.5,
+                )
 
-                    max_confidence = 0.0
+                if x_center < 0.35:
+                    obstacle.left = True
 
-                    for detection in detections:
+                elif x_center > 0.65:
+                    obstacle.right = True
 
-                        confidence = safe_float(
-                            detection.get(
-                                "confidence",
-                                0.0,
-                            ),
-                            0.0,
-                        )
+                else:
+                    obstacle.center = True
 
-                        max_confidence = max(
-                            max_confidence,
-                            confidence,
-                        )
+        # ----------------------------------------------------
+        # 前方近接だが、カメラ障害物がない場合
+        #
+        # 「障害物確定」にはしない。
+        # safety側で前方危険として扱う。
+        # ----------------------------------------------------
 
-                    obstacle_state.confidence = max(
-                        obstacle_state.confidence,
-                        max_confidence,
-                    )
+        if front_close and not obstacle.detected:
 
-        return obstacle_state
+            obstacle.distance = front_distance
+
+        return obstacle
+
     # ========================================================
     # コース解析
     # ========================================================
@@ -1090,39 +1324,11 @@ class Perception:
         camera_data: Dict[str, Any],
         lidar_data: Dict[str, Any],
     ) -> CourseState:
-        """
-        壁・障害物・カメラ・LiDAR情報から
-        コースの状態を推定する。
-
-        主な出力:
-
-            ・左右どちらが開いているか
-            ・進行方向
-            ・コーナー方向
-            ・行き止まり
-            ・交差点
-            ・コース中央からのずれ
-            ・推定コース幅
-
-        direction:
-            -1.0 = 左
-             0.0 = 直進
-             1.0 = 右
-        """
 
         course = CourseState()
 
-        # ----------------------------------------------------
-        # 距離を取得
-        # ----------------------------------------------------
-
         left = safe_float(
             wall_state.left_distance,
-            self.default_distance,
-        )
-
-        front = safe_float(
-            wall_state.front_distance,
             self.default_distance,
         )
 
@@ -1131,49 +1337,47 @@ class Perception:
             self.default_distance,
         )
 
-        # ----------------------------------------------------
-        # 左右の空き具合
-        # ----------------------------------------------------
-
-        course.left_free_space = self._calculate_free_space(
-            left
+        front = safe_float(
+            wall_state.front_distance,
+            self.default_distance,
         )
 
-        course.right_free_space = self._calculate_free_space(
-            right
+        # ----------------------------------------------------
+        # 空き具合
+        # ----------------------------------------------------
+
+        course.left_free_space = (
+            self._calculate_free_space(
+                left
+            )
+        )
+
+        course.right_free_space = (
+            self._calculate_free_space(
+                right
+            )
         )
 
         # ----------------------------------------------------
         # 左右どちらが広いか
+        #
+        # ここは0～1同士を比較する。
         # ----------------------------------------------------
 
-        gap_margin = float(
-            get_config(
-                "PERCEPTION_GAP_MARGIN",
-                100.0,
-            )
+        diff = (
+            course.right_free_space
+            -
+            course.left_free_space
         )
 
-        if (
-            course.left_free_space
-            > course.right_free_space + gap_margin
-        ):
+        if diff < -self.gap_margin:
             course.left_open = True
-            course.right_open = False
 
-        elif (
-            course.right_free_space
-            > course.left_free_space + gap_margin
-        ):
-            course.left_open = False
+        elif diff > self.gap_margin:
             course.right_open = True
 
-        else:
-            course.left_open = False
-            course.right_open = False
-
         # ----------------------------------------------------
-        # 基本進行方向
+        # 基本方向
         # ----------------------------------------------------
 
         direction_gain = float(
@@ -1183,41 +1387,39 @@ class Perception:
             )
         )
 
-        free_space_total = (
-            course.left_free_space
-            + course.right_free_space
-            + 1.0
-        )
-
-        direction_difference = (
-            course.right_free_space
-            - course.left_free_space
-        )
-
         course.direction = clamp(
             direction_gain
-            * direction_difference
-            / free_space_total,
+            * diff,
             -1.0,
             1.0,
         )
 
         # ----------------------------------------------------
-        # カメラから方向情報が得られている場合
+        # 中央ずれ
         # ----------------------------------------------------
 
-        camera_direction = camera_data.get(
-            "direction"
+        course.center_offset = (
+            self._calculate_center_offset(
+                left,
+                right,
+            )
         )
 
-        camera_confidence = clamp(
+        # ----------------------------------------------------
+        # カメラ方向
+        # ----------------------------------------------------
+
+        camera_direction = (
+            camera_data.get(
+                "direction"
+            )
+        )
+
+        camera_direction_confidence = clamp(
             safe_float(
                 camera_data.get(
                     "direction_confidence",
-                    camera_data.get(
-                        "confidence",
-                        0.0,
-                    ),
+                    0.0,
                 ),
                 0.0,
             ),
@@ -1225,89 +1427,69 @@ class Perception:
             1.0,
         )
 
-        camera_threshold = float(
-            get_config(
-                "PERCEPTION_CAMERA_CONFIDENCE_THRESHOLD",
-                0.60,
-            )
-        )
-
         if (
             camera_direction is not None
-            and camera_confidence >= camera_threshold
+            and
+            camera_direction_confidence
+            >= self.camera_confidence_threshold
         ):
 
-            camera_direction_value = self._convert_direction_value(
-                camera_direction
+            camera_direction_value = (
+                self._convert_direction_value(
+                    camera_direction
+                )
             )
 
-            camera_weight = clamp(
-                float(
-                    get_config(
-                        "PERCEPTION_CAMERA_DIRECTION_WEIGHT",
-                        0.50,
-                    )
-                ),
+            weight = (
+                self.camera_direction_weight
+                *
+                camera_direction_confidence
+            )
+
+            weight = clamp(
+                weight,
                 0.0,
                 1.0,
             )
 
-            ultrasonic_weight = 1.0 - camera_weight
-
             course.direction = clamp(
                 course.direction
-                * ultrasonic_weight
+                * (1.0 - weight)
                 +
                 camera_direction_value
-                * camera_weight,
+                * weight,
                 -1.0,
                 1.0,
             )
 
         # ----------------------------------------------------
-        # 障害物による方向補正
+        # 障害物回避方向
         # ----------------------------------------------------
 
         if obstacle_state.detected:
 
-            obstacle_avoidance_gain = float(
-                get_config(
-                    "PERCEPTION_OBSTACLE_DIRECTION_GAIN",
-                    0.60,
-                )
-            )
+            if (
+                obstacle_state.center
+            ):
 
-            # 中央に障害物
-            if obstacle_state.center:
-
-                if (
-                    right > left
-                ):
-                    course.direction += (
-                        obstacle_avoidance_gain
-                    )
-
-                elif (
-                    left > right
-                ):
+                if left > right:
                     course.direction -= (
-                        obstacle_avoidance_gain
+                        self.obstacle_steering_gain
                     )
 
-            # 左側障害物
-            if obstacle_state.left:
+                elif right > left:
+                    course.direction += (
+                        self.obstacle_steering_gain
+                    )
 
+            elif obstacle_state.left:
                 course.direction += (
-                    obstacle_avoidance_gain
-                    * 0.5
+                    self.obstacle_steering_gain
                 )
 
-            # 右側障害物
-            if obstacle_state.right:
-
+            elif obstacle_state.right:
                 course.direction -= (
-                    obstacle_avoidance_gain
-                    * 0.5
+                    self.obstacle_steering_gain
                 )
 
         course.direction = clamp(
@@ -1317,132 +1499,141 @@ class Perception:
         )
 
         # ----------------------------------------------------
-        # コース中央からのずれ
+        # コーナー
         # ----------------------------------------------------
 
-        course.center_offset = self._calculate_center_offset(
-            left,
-            right,
+        (
+            corner_detected,
+            corner_direction,
+        ) = self._detect_corner(
+            wall_state,
+            course.direction,
+            camera_data,
+        )
+
+        course.corner_detected = (
+            corner_detected
+        )
+
+        course.corner_direction = (
+            corner_direction
         )
 
         # ----------------------------------------------------
-        # コース幅推定
+        # 行き止まり
         # ----------------------------------------------------
 
-        course.estimated_width = self._estimate_course_width(
-            left,
-            right,
-        )
-
-        # ----------------------------------------------------
-        # コーナー判定
-        # ----------------------------------------------------
-
-        corner_detected, corner_direction = (
-            self._detect_corner(
-                wall_state=wall_state,
-                course_direction=course.direction,
-                camera_data=camera_data,
+        course.dead_end = (
+            self._detect_dead_end(
+                wall_state,
+                obstacle_state,
+                camera_data,
             )
         )
 
-        course.corner_detected = corner_detected
-        course.corner_direction = corner_direction
-
         # ----------------------------------------------------
-        # 行き止まり判定
+        # 交差点
         # ----------------------------------------------------
 
-        course.dead_end = self._detect_dead_end(
-            wall_state=wall_state,
-            obstacle_state=obstacle_state,
-            camera_data=camera_data,
+        course.intersection = (
+            self._detect_intersection(
+                wall_state,
+                camera_data,
+            )
         )
 
         # ----------------------------------------------------
-        # 交差点判定
+        # コース幅
         # ----------------------------------------------------
 
-        course.intersection = self._detect_intersection(
-            wall_state=wall_state,
-            camera_data=camera_data,
+        course.estimated_width = (
+            left + right
         )
 
         # ----------------------------------------------------
-        # LiDAR情報を利用可能なら補正
+        # LiDAR
         # ----------------------------------------------------
 
-        course = self._fuse_lidar_course_information(
-            course,
-            lidar_data,
+        course = (
+            self._fuse_lidar_course_information(
+                course,
+                lidar_data,
+            )
         )
 
         return course
 
     # ========================================================
-    # 空き具合計算
+    # 空き具合
     # ========================================================
 
     def _calculate_free_space(
         self,
         distance: float,
     ) -> float:
-        """
-        距離を「空き具合」に変換する。
-
-        距離が大きいほど広いと判断する。
-
-        0.0 ～ 1.0に正規化。
-        """
-
-        reference = float(
-            get_config(
-                "PERCEPTION_FREE_SPACE_REFERENCE",
-                1500.0,
-            )
-        )
-
-        if reference <= 0:
-            reference = 1500.0
 
         return clamp(
-            distance / reference,
+            distance
+            /
+            self.free_space_reference,
             0.0,
             1.0,
         )
 
     # ========================================================
-    # 方向値変換
+    # 中央ずれ
+    # ========================================================
+
+    def _calculate_center_offset(
+        self,
+        left_distance: float,
+        right_distance: float,
+    ) -> float:
+
+        denominator = (
+            left_distance
+            +
+            right_distance
+            +
+            1.0
+        )
+
+        if denominator <= 0:
+            return 0.0
+
+        # + = 右側が広い
+        # - = 左側が広い
+        offset = (
+            right_distance
+            -
+            left_distance
+        ) / denominator
+
+        return clamp(
+            offset,
+            -1.0,
+            1.0,
+        )
+
+    # ========================================================
+    # 方向変換
     # ========================================================
 
     def _convert_direction_value(
         self,
         direction: Any,
     ) -> float:
-        """
-        カメラ等から来る方向情報を
-        -1.0～1.0へ変換する。
-
-        対応例:
-
-            "left"
-            "center"
-            "right"
-
-        または
-
-            -1
-             0
-             1
-
-        """
 
         if isinstance(
             direction,
             str,
         ):
 
-            value = direction.lower().strip()
+            value = (
+                direction
+                .lower()
+                .strip()
+            )
 
             if value in (
                 "left",
@@ -1478,69 +1669,7 @@ class Perception:
         )
 
     # ========================================================
-    # コース中央推定
-    # ========================================================
-
-    def _calculate_center_offset(
-        self,
-        left_distance: float,
-        right_distance: float,
-    ) -> float:
-        """
-        左右の壁距離から
-        車体がコース中央からどれだけずれているかを推定する。
-
-        -1.0 = 左寄り
-         0.0 = 中央
-        +1.0 = 右寄り
-        """
-
-        denominator = (
-            left_distance
-            + right_distance
-            + 1.0
-        )
-
-        offset = (
-            right_distance
-            - left_distance
-        ) / denominator
-
-        return clamp(
-            offset,
-            -1.0,
-            1.0,
-        )
-
-    # ========================================================
-    # コース幅推定
-    # ========================================================
-
-    def _estimate_course_width(
-        self,
-        left_distance: float,
-        right_distance: float,
-    ) -> float:
-        """
-        左右距離からコース幅を推定する。
-
-        実際の幾何学的なコース幅ではなく、
-        「車体から見た左右の余裕量」
-        として扱う。
-        """
-
-        width = (
-            left_distance
-            + right_distance
-        )
-
-        return max(
-            0.0,
-            width,
-        )
-
-    # ========================================================
-    # コーナー判定
+    # コーナー
     # ========================================================
 
     def _detect_corner(
@@ -1548,20 +1677,22 @@ class Perception:
         wall_state: WallState,
         course_direction: float,
         camera_data: Dict[str, Any],
-    ) -> Tuple[bool, Optional[str]]:
-        """
-        コーナーを推定する。
-        """
+    ) -> Tuple[
+        bool,
+        Optional[str],
+    ]:
 
         # ----------------------------------------------------
-        # カメラが直接コーナーを認識した場合
+        # カメラ優先
         # ----------------------------------------------------
 
-        camera_corner = camera_data.get(
-            "corner"
+        camera_corner = (
+            camera_data.get(
+                "corner"
+            )
         )
 
-        camera_corner_confidence = clamp(
+        camera_confidence = clamp(
             safe_float(
                 camera_data.get(
                     "corner_confidence",
@@ -1573,34 +1704,23 @@ class Perception:
             1.0,
         )
 
-        corner_confidence_threshold = float(
-            get_config(
-                "PERCEPTION_CORNER_CONFIDENCE_THRESHOLD",
-                0.60,
-            )
-        )
-
         if (
-            camera_corner is not None
-            and camera_corner_confidence
-            >= corner_confidence_threshold
+            camera_corner
+            in (
+                "left",
+                "right",
+            )
+            and
+            camera_confidence
+            >= self.camera_confidence_threshold
         ):
-
-            if isinstance(
+            return (
+                True,
                 camera_corner,
-                str,
-            ):
-
-                value = camera_corner.lower()
-
-                if value in (
-                    "left",
-                    "right",
-                ):
-                    return True, value
+            )
 
         # ----------------------------------------------------
-        # 超音波から推定
+        # 超音波ベース
         # ----------------------------------------------------
 
         front = safe_float(
@@ -1618,46 +1738,36 @@ class Perception:
             self.default_distance,
         )
 
-        corner_front_threshold = float(
-            get_config(
-                "PERCEPTION_CORNER_FRONT_DISTANCE",
-                self.wall_detection_distance,
-            )
+        if front > self.corner_front_distance:
+            return False, None
+
+        difference = (
+            left
+            -
+            right
         )
 
-        corner_side_difference = float(
-            get_config(
-                "PERCEPTION_CORNER_SIDE_DIFFERENCE",
-                200.0,
-            )
-        )
+        if (
+            abs(difference)
+            >=
+            self.corner_side_difference
+        ):
 
-        # 前方が近い
-        if front <= corner_front_threshold:
-
-            difference = (
-                left - right
-            )
-
-            if abs(difference) >= corner_side_difference:
-
-                if difference > 0:
-                    return True, "left"
-
-                return True, "right"
-
-            # 左右差が小さい場合は
-            # 現在の進行方向を参考にする
-            if course_direction < -0.25:
+            if difference > 0:
                 return True, "left"
 
-            if course_direction > 0.25:
-                return True, "right"
+            return True, "right"
+
+        if course_direction < -0.30:
+            return True, "left"
+
+        if course_direction > 0.30:
+            return True, "right"
 
         return False, None
 
     # ========================================================
-    # 行き止まり判定
+    # 行き止まり
     # ========================================================
 
     def _detect_dead_end(
@@ -1666,11 +1776,7 @@ class Perception:
         obstacle_state: ObstacleState,
         camera_data: Dict[str, Any],
     ) -> bool:
-        """
-        行き止まりを推定する。
-        """
 
-        # カメラが直接認識している場合
         if safe_bool(
             camera_data.get(
                 "dead_end",
@@ -1679,64 +1785,47 @@ class Perception:
         ):
             return True
 
-        left = safe_float(
-            wall_state.left_distance,
-            self.default_distance,
-        )
-
-        front = safe_float(
-            wall_state.front_distance,
-            self.default_distance,
-        )
-
-        right = safe_float(
-            wall_state.right_distance,
-            self.default_distance,
-        )
-
         dead_end_distance = float(
             get_config(
                 "PERCEPTION_DEAD_END_DISTANCE",
-                get_config(
-                    "BACKWARD_RANGE",
-                    300.0,
-                ),
+                300.0,
             )
         )
 
         left_blocked = (
-            left <= dead_end_distance
+            wall_state.left_distance
+            is not None
+            and
+            wall_state.left_distance
+            <= dead_end_distance
         )
 
         front_blocked = (
-            front <= dead_end_distance
+            wall_state.front_distance
+            is not None
+            and
+            wall_state.front_distance
+            <= dead_end_distance
         )
 
         right_blocked = (
-            right <= dead_end_distance
+            wall_state.right_distance
+            is not None
+            and
+            wall_state.right_distance
+            <= dead_end_distance
         )
 
-        # 三方向がほぼ塞がっている
-        if (
+        return (
             left_blocked
-            and front_blocked
-            and right_blocked
-        ):
-            return True
-
-        # 正面＋障害物で脱出方向がない
-        if (
+            and
             front_blocked
-            and obstacle_state.detected
-            and left_blocked
-            and right_blocked
-        ):
-            return True
-
-        return False
+            and
+            right_blocked
+        )
 
     # ========================================================
-    # 交差点判定
+    # 交差点
     # ========================================================
 
     def _detect_intersection(
@@ -1744,11 +1833,7 @@ class Perception:
         wall_state: WallState,
         camera_data: Dict[str, Any],
     ) -> bool:
-        """
-        交差点を推定する。
-        """
 
-        # カメラが直接判断した場合
         if safe_bool(
             camera_data.get(
                 "intersection",
@@ -1757,6 +1842,13 @@ class Perception:
         ):
             return True
 
+        intersection_open_distance = float(
+            get_config(
+                "PERCEPTION_INTERSECTION_OPEN_DISTANCE",
+                1200.0,
+            )
+        )
+
         left = safe_float(
             wall_state.left_distance,
             self.default_distance,
@@ -1767,24 +1859,18 @@ class Perception:
             self.default_distance,
         )
 
-        intersection_open_distance = float(
-            get_config(
-                "PERCEPTION_INTERSECTION_OPEN_DISTANCE",
-                1200.0,
-            )
+        return (
+            left
+            >=
+            intersection_open_distance
+            and
+            right
+            >=
+            intersection_open_distance
         )
 
-        # 左右両方が大きく開いている
-        if (
-            left >= intersection_open_distance
-            and right >= intersection_open_distance
-        ):
-            return True
-
-        return False
-
     # ========================================================
-    # LiDARコース情報統合
+    # LiDAR
     # ========================================================
 
     def _fuse_lidar_course_information(
@@ -1792,18 +1878,14 @@ class Perception:
         course: CourseState,
         lidar_data: Dict[str, Any],
     ) -> CourseState:
-        """
-        LiDARを使用する場合のコース情報統合。
-
-        現時点では柔軟な入力形式に対応するため、
-        共通フィールドがある場合だけ利用する。
-        """
 
         if not lidar_data:
             return course
 
-        lidar_direction = lidar_data.get(
-            "direction"
+        lidar_direction = (
+            lidar_data.get(
+                "direction"
+            )
         )
 
         lidar_confidence = clamp(
@@ -1827,14 +1909,21 @@ class Perception:
 
         if (
             lidar_direction is not None
-            and lidar_confidence >= lidar_threshold
+            and
+            lidar_confidence
+            >=
+            lidar_threshold
         ):
 
-            lidar_value = self._convert_direction_value(
-                lidar_direction
+            lidar_value = (
+                self._convert_direction_value(
+                    lidar_direction
+                )
             )
 
-            lidar_weight = clamp(
+            weight = clamp(
+                lidar_confidence
+                *
                 float(
                     get_config(
                         "PERCEPTION_LIDAR_DIRECTION_WEIGHT",
@@ -1847,15 +1936,14 @@ class Perception:
 
             course.direction = clamp(
                 course.direction
-                * (1.0 - lidar_weight)
+                * (1.0 - weight)
                 +
                 lidar_value
-                * lidar_weight,
+                * weight,
                 -1.0,
                 1.0,
             )
 
-        # LiDARが左側の広い空間を報告
         if safe_bool(
             lidar_data.get(
                 "left_open",
@@ -1864,7 +1952,6 @@ class Perception:
         ):
             course.left_open = True
 
-        # LiDARが右側の広い空間を報告
         if safe_bool(
             lidar_data.get(
                 "right_open",
@@ -1873,7 +1960,6 @@ class Perception:
         ):
             course.right_open = True
 
-        # LiDARが交差点を報告
         if safe_bool(
             lidar_data.get(
                 "intersection",
@@ -1882,7 +1968,6 @@ class Perception:
         ):
             course.intersection = True
 
-        # LiDARが行き止まりを報告
         if safe_bool(
             lidar_data.get(
                 "dead_end",
@@ -1892,8 +1977,9 @@ class Perception:
             course.dead_end = True
 
         return course
+
     # ========================================================
-    # 安全状態解析
+    # 安全解析
     # ========================================================
 
     def _analyze_safety(
@@ -1902,27 +1988,16 @@ class Perception:
         obstacle_state: ObstacleState,
         course_state: CourseState,
     ) -> SafetyState:
-        """
-        壁・障害物・コース状態から安全性を評価する。
-
-        danger_level:
-            0.0 = 安全
-            1.0 = 非常に危険
-        """
 
         safety = SafetyState()
 
-        # ----------------------------------------------------
-        # 距離取得
-        # ----------------------------------------------------
-
-        left = safe_float(
-            wall_state.left_distance,
+        front = safe_float(
+            wall_state.front_distance,
             self.default_distance,
         )
 
-        front = safe_float(
-            wall_state.front_distance,
+        left = safe_float(
+            wall_state.left_distance,
             self.default_distance,
         )
 
@@ -1932,100 +2007,93 @@ class Perception:
         )
 
         # ----------------------------------------------------
-        # 各方向の危険度
+        # 前方危険度
         # ----------------------------------------------------
-
-        left_risk = self._distance_risk(
-            left,
-            self.obstacle_detection_distance,
-            self.emergency_distance,
-        )
 
         front_risk = self._distance_risk(
             front,
-            self.obstacle_detection_distance,
+            self.front_warning_distance,
             self.emergency_distance,
+        )
+
+        # ----------------------------------------------------
+        # 左右は「壁があるから危険」ではなく、
+        # あまりにも近い場合だけ接触リスク
+        # ----------------------------------------------------
+
+        side_warning_distance = float(
+            get_config(
+                "PERCEPTION_SIDE_WARNING_DISTANCE",
+                100.0,
+            )
+        )
+
+        left_risk = self._distance_risk(
+            left,
+            side_warning_distance,
+            50.0,
         )
 
         right_risk = self._distance_risk(
             right,
-            self.obstacle_detection_distance,
-            self.emergency_distance,
+            side_warning_distance,
+            50.0,
         )
 
-        # ----------------------------------------------------
-        # 最も高い危険度
-        # ----------------------------------------------------
-
         safety.collision_risk = max(
-            left_risk,
             front_risk,
+            left_risk,
             right_risk,
         )
 
-        safety.danger_level = safety.collision_risk
-
         # ----------------------------------------------------
-        # 障害物認識による危険度加算
+        # カメラ/YOLO障害物
         # ----------------------------------------------------
 
         if obstacle_state.detected:
 
-            obstacle_weight = clamp(
-                float(
-                    get_config(
-                        "PERCEPTION_OBSTACLE_RISK_WEIGHT",
-                        0.30,
-                    )
-                ),
-                0.0,
-                1.0,
-            )
-
-            obstacle_risk = clamp(
+            safety.collision_risk = max(
+                safety.collision_risk,
                 obstacle_state.confidence,
-                0.0,
-                1.0,
             )
 
-            safety.danger_level = max(
-                safety.danger_level,
-                clamp(
-                    safety.danger_level
-                    + obstacle_risk
-                    * obstacle_weight,
-                    0.0,
-                    1.0,
-                ),
-            )
+        safety.danger_level = clamp(
+            safety.collision_risk,
+            0.0,
+            1.0,
+        )
 
         # ----------------------------------------------------
         # 緊急停止
         # ----------------------------------------------------
 
-        if front <= self.emergency_distance:
-            safety.emergency = True
-            safety.must_stop = True
-
-        # カメラが正面障害物を高信頼度で検出
         if (
-            obstacle_state.center
-            and obstacle_state.confidence
-            >= float(
-                get_config(
-                    "PERCEPTION_EMERGENCY_CONFIDENCE",
-                    0.80,
-                )
-            )
+            front
+            <=
+            self.emergency_distance
         ):
             safety.emergency = True
             safety.must_stop = True
 
         # ----------------------------------------------------
-        # 減速判定
+        # カメラ/YOLOの高信頼度正面障害物
         # ----------------------------------------------------
 
-        slow_down_risk = float(
+        if (
+            obstacle_state.center
+            and
+            obstacle_state.confidence
+            >=
+            0.85
+        ):
+            safety.emergency = True
+            safety.must_stop = True
+
+        # ----------------------------------------------------
+        # 減速
+        # ----------------------------------------------------
+
+        slow_down_threshold = float(
             get_config(
                 "PERCEPTION_SLOW_DOWN_RISK",
                 0.35,
@@ -2034,14 +2102,11 @@ class Perception:
 
         safety.must_slow_down = (
             safety.danger_level
-            >= slow_down_risk
+            >=
+            slow_down_threshold
         )
 
-        # ----------------------------------------------------
-        # 行き止まり
-        # ----------------------------------------------------
-
-        if course_state.dead_end:
+        if course_state.corner_detected:
             safety.must_slow_down = True
 
         # ----------------------------------------------------
@@ -2050,17 +2115,17 @@ class Perception:
 
         safety.escape_direction = (
             self._select_escape_direction(
-                left_distance=left,
-                right_distance=right,
-                obstacle_state=obstacle_state,
-                course_state=course_state,
+                left,
+                right,
+                obstacle_state,
+                course_state,
             )
         )
 
         return safety
 
     # ========================================================
-    # 距離から危険度を計算
+    # 危険度
     # ========================================================
 
     def _distance_risk(
@@ -2069,15 +2134,6 @@ class Perception:
         warning_distance: float,
         emergency_distance: float,
     ) -> float:
-        """
-        距離を0～1の危険度に変換する。
-
-        warning_distance:
-            この距離より遠ければ基本的に安全。
-
-        emergency_distance:
-            この距離以下なら危険度1.0。
-        """
 
         if distance <= emergency_distance:
             return 1.0
@@ -2085,18 +2141,20 @@ class Perception:
         if distance >= warning_distance:
             return 0.0
 
-        range_size = (
+        span = (
             warning_distance
-            - emergency_distance
+            -
+            emergency_distance
         )
 
-        if range_size <= 0:
+        if span <= 0:
             return 1.0
 
         risk = (
             warning_distance
-            - distance
-        ) / range_size
+            -
+            distance
+        ) / span
 
         return clamp(
             risk,
@@ -2105,7 +2163,7 @@ class Perception:
         )
 
     # ========================================================
-    # 回避方向選択
+    # 回避方向
     # ========================================================
 
     def _select_escape_direction(
@@ -2115,51 +2173,28 @@ class Perception:
         obstacle_state: ObstacleState,
         course_state: CourseState,
     ) -> Optional[str]:
-        """
-        障害物を避ける方向を決める。
 
-        Returns:
-            "left"
-            "right"
-            None
-        """
+        if obstacle_state.left:
+            return "right"
 
-        # ----------------------------------------------------
-        # 正面障害物
-        # ----------------------------------------------------
+        if obstacle_state.right:
+            return "left"
 
         if obstacle_state.center:
 
-            # 左右の空きを比較
             if (
                 left_distance
-                > right_distance
+                >
+                right_distance
             ):
                 return "left"
 
             if (
                 right_distance
-                > left_distance
+                >
+                left_distance
             ):
                 return "right"
-
-        # ----------------------------------------------------
-        # 左側障害物
-        # ----------------------------------------------------
-
-        if obstacle_state.left:
-            return "right"
-
-        # ----------------------------------------------------
-        # 右側障害物
-        # ----------------------------------------------------
-
-        if obstacle_state.right:
-            return "left"
-
-        # ----------------------------------------------------
-        # コースの空き具合
-        # ----------------------------------------------------
 
         if course_state.left_open:
             return "left"
@@ -2170,7 +2205,7 @@ class Perception:
         return None
 
     # ========================================================
-    # 走行推奨値計算
+    # 推奨値
     # ========================================================
 
     def _calculate_recommendation(
@@ -2180,19 +2215,10 @@ class Perception:
         course_state: CourseState,
         safety_state: SafetyState,
     ) -> DrivingRecommendation:
-        """
-        perceptionからplannerへ渡す推奨操舵・速度を計算する。
 
-        重要:
-            ここでは最終PWM値は決めない。
-
-            -1.0 ～ +1.0 の方向
-            0.0 ～ 1.0 の速度
-
-        を返す。
-        """
-
-        recommendation = DrivingRecommendation()
+        recommendation = (
+            DrivingRecommendation()
+        )
 
         # ----------------------------------------------------
         # 緊急停止
@@ -2203,50 +2229,19 @@ class Perception:
             recommendation.steering = 0.0
             recommendation.throttle = 0.0
             recommendation.confidence = 1.0
-            recommendation.reason = "emergency_stop"
+            recommendation.reason = (
+                "emergency_stop"
+            )
 
             return recommendation
 
         # ----------------------------------------------------
-        # 基本方向
+        # 基本ステア
         # ----------------------------------------------------
 
-        steering = course_state.direction
-
-        # ----------------------------------------------------
-        # 障害物回避
-        # ----------------------------------------------------
-
-        if obstacle_state.detected:
-
-            escape_direction = (
-                safety_state.escape_direction
-            )
-
-            obstacle_gain = clamp(
-                float(
-                    get_config(
-                        "PERCEPTION_OBSTACLE_STEERING_GAIN",
-                        0.70,
-                    )
-                ),
-                0.0,
-                1.0,
-            )
-
-            if escape_direction == "left":
-
-                steering = min(
-                    steering,
-                    -obstacle_gain,
-                )
-
-            elif escape_direction == "right":
-
-                steering = max(
-                    steering,
-                    obstacle_gain,
-                )
+        steering = (
+            course_state.direction
+        )
 
         # ----------------------------------------------------
         # コーナー
@@ -2254,63 +2249,41 @@ class Perception:
 
         if course_state.corner_detected:
 
-            corner_gain = clamp(
-                float(
-                    get_config(
-                        "PERCEPTION_CORNER_STEERING_GAIN",
-                        0.80,
-                    )
-                ),
-                0.0,
-                1.0,
-            )
-
             if course_state.corner_direction == "left":
-
                 steering = min(
                     steering,
-                    -corner_gain,
+                    -self.corner_steering_gain,
                 )
 
             elif course_state.corner_direction == "right":
-
                 steering = max(
                     steering,
-                    corner_gain,
+                    self.corner_steering_gain,
                 )
 
         # ----------------------------------------------------
-        # 行き止まり
+        # 障害物
         # ----------------------------------------------------
 
-        if course_state.dead_end:
+        if obstacle_state.detected:
 
-            escape_direction = (
+            escape = (
                 safety_state.escape_direction
             )
 
-            dead_end_gain = clamp(
-                float(
-                    get_config(
-                        "PERCEPTION_DEAD_END_STEERING_GAIN",
-                        1.0,
-                    )
-                ),
-                0.0,
-                1.0,
-            )
+            if escape == "left":
 
-            if escape_direction == "left":
+                steering = min(
+                    steering,
+                    -self.obstacle_steering_gain,
+                )
 
-                steering = -dead_end_gain
+            elif escape == "right":
 
-            elif escape_direction == "right":
-
-                steering = dead_end_gain
-
-        # ----------------------------------------------------
-        # ステアリング制限
-        # ----------------------------------------------------
+                steering = max(
+                    steering,
+                    self.obstacle_steering_gain,
+                )
 
         steering = clamp(
             steering,
@@ -2318,55 +2291,51 @@ class Perception:
             1.0,
         )
 
-        recommendation.steering = steering
+        recommendation.steering = (
+            steering
+        )
 
         # ----------------------------------------------------
         # 基本速度
         # ----------------------------------------------------
 
-        base_throttle = float(
-            get_config(
-                "PERCEPTION_BASE_THROTTLE",
-                0.70,
-            )
+        throttle = (
+            self.base_throttle
         )
 
-        throttle = clamp(
-            base_throttle,
+        # ----------------------------------------------------
+        # 前方距離
+        # ----------------------------------------------------
+
+        front_factor = clamp(
+            wall_state.front_distance
+            /
+            max(
+                1.0,
+                self.front_warning_distance,
+            ),
             0.0,
             1.0,
         )
 
-        # ----------------------------------------------------
-        # 前方距離による速度制御
-        # ----------------------------------------------------
-
-        front = safe_float(
-            wall_state.front_distance,
-            self.default_distance,
-        )
-
-        speed_reference = float(
-            get_config(
-                "PERCEPTION_SPEED_REFERENCE",
-                1500.0,
+        # 前方が近いほど速度を落とす
+        if front_factor < 1.0:
+            throttle *= (
+                0.35
+                +
+                0.65
+                * front_factor
             )
-        )
 
-        if speed_reference <= 0:
-            speed_reference = 1500.0
+        # ----------------------------------------------------
+        # 曲がるほど減速
+        # ----------------------------------------------------
 
-        front_speed_factor = clamp(
-            front / speed_reference,
-            0.0,
-            1.0,
-        )
-
-        front_weight = clamp(
+        steering_slowdown = clamp(
             float(
                 get_config(
-                    "PERCEPTION_FRONT_SPEED_WEIGHT",
-                    0.60,
+                    "PERCEPTION_STEERING_SLOWDOWN",
+                    0.45,
                 )
             ),
             0.0,
@@ -2376,57 +2345,42 @@ class Perception:
         throttle *= (
             1.0
             -
-            front_weight
-            * (
-                1.0
-                -
-                front_speed_factor
-            )
-        )
-
-        # ----------------------------------------------------
-        # ステアリングによる減速
-        # ----------------------------------------------------
-
-        steering_slowdown = float(
-            get_config(
-                "PERCEPTION_STEERING_SLOWDOWN",
-                0.35,
-            )
-        )
-
-        throttle *= (
-            1.0
-            -
             steering_slowdown
-            * abs(steering)
+            * abs(
+                steering
+            )
         )
 
         # ----------------------------------------------------
-        # 危険度による減速
+        # 危険度
         # ----------------------------------------------------
 
-        danger_slowdown = float(
-            get_config(
-                "PERCEPTION_DANGER_SLOWDOWN",
-                0.60,
-            )
+        danger_slowdown = clamp(
+            float(
+                get_config(
+                    "PERCEPTION_DANGER_SLOWDOWN",
+                    0.55,
+                )
+            ),
+            0.0,
+            1.0,
         )
 
         throttle *= (
             1.0
             -
             danger_slowdown
-            * safety_state.danger_level
+            *
+            safety_state.danger_level
         )
 
         # ----------------------------------------------------
-        # 明確な減速要求
+        # 明確な減速
         # ----------------------------------------------------
 
         if safety_state.must_slow_down:
 
-            slow_down_factor = clamp(
+            throttle *= clamp(
                 float(
                     get_config(
                         "PERCEPTION_SLOW_DOWN_FACTOR",
@@ -2437,230 +2391,138 @@ class Perception:
                 1.0,
             )
 
-            throttle *= slow_down_factor
-
         # ----------------------------------------------------
-        # 最小速度
+        # 最小・最大
         # ----------------------------------------------------
 
-        minimum_throttle = clamp(
-            float(
-                get_config(
-                    "PERCEPTION_MIN_THROTTLE",
-                    0.20,
-                )
-            ),
-            0.0,
-            1.0,
-        )
-
-        # 緊急停止ではない場合のみ最低速度を保証
-        if (
-            throttle > 0.0
-            and not safety_state.must_stop
-        ):
+        if throttle > 0:
             throttle = max(
                 throttle,
-                minimum_throttle,
+                self.minimum_throttle,
             )
-
-        # ----------------------------------------------------
-        # 行き止まりなら速度を抑える
-        # ----------------------------------------------------
-
-        if course_state.dead_end:
-
-            dead_end_throttle = clamp(
-                float(
-                    get_config(
-                        "PERCEPTION_DEAD_END_THROTTLE",
-                        0.20,
-                    )
-                ),
-                0.0,
-                1.0,
-            )
-
-            throttle = min(
-                throttle,
-                dead_end_throttle,
-            )
-
-        # ----------------------------------------------------
-        # 最終速度制限
-        # ----------------------------------------------------
-
-        maximum_throttle = clamp(
-            float(
-                get_config(
-                    "PERCEPTION_MAX_THROTTLE",
-                    1.0,
-                )
-            ),
-            0.0,
-            1.0,
-        )
 
         throttle = clamp(
             throttle,
             0.0,
-            maximum_throttle,
+            self.maximum_throttle,
         )
 
-        recommendation.throttle = throttle
+        recommendation.throttle = (
+            throttle
+        )
 
         # ----------------------------------------------------
         # 信頼度
         # ----------------------------------------------------
 
-        confidence = self._calculate_recommendation_confidence(
-            wall_state=wall_state,
-            obstacle_state=obstacle_state,
-            course_state=course_state,
-            safety_state=safety_state,
+        recommendation.confidence = (
+            self._calculate_confidence(
+                wall_state,
+                obstacle_state,
+                course_state,
+            )
         )
-
-        recommendation.confidence = confidence
 
         # ----------------------------------------------------
         # 理由
         # ----------------------------------------------------
 
         recommendation.reason = (
-            self._build_recommendation_reason(
-                wall_state=wall_state,
-                obstacle_state=obstacle_state,
-                course_state=course_state,
-                safety_state=safety_state,
+            self._build_reason(
+                obstacle_state,
+                course_state,
+                safety_state,
             )
         )
 
         return recommendation
 
     # ========================================================
-    # 推奨値の信頼度
+    # 信頼度
     # ========================================================
 
-    def _calculate_recommendation_confidence(
+    def _calculate_confidence(
         self,
         wall_state: WallState,
         obstacle_state: ObstacleState,
         course_state: CourseState,
-        safety_state: SafetyState,
     ) -> float:
-        """
-        走行推奨値の信頼度を計算する。
 
-        センサーが一致しているほど高くする。
-        """
+        values = []
 
-        confidence_values = []
-
-        # 壁認識
         if wall_state.left_detected:
-            confidence_values.append(
+            values.append(
                 wall_state.left_confidence
             )
 
-        if wall_state.front_detected:
-            confidence_values.append(
-                wall_state.front_confidence
-            )
-
         if wall_state.right_detected:
-            confidence_values.append(
+            values.append(
                 wall_state.right_confidence
             )
 
-        # 障害物
+        if wall_state.front_detected:
+            values.append(
+                wall_state.front_confidence
+            )
+
         if obstacle_state.detected:
-            confidence_values.append(
+            values.append(
                 obstacle_state.confidence
             )
 
-        # コーナーなど
         if course_state.corner_detected:
-            confidence_values.append(
+            values.append(
                 0.80
             )
 
-        # 安全性
-        if safety_state.emergency:
-            confidence_values.append(
-                1.0
-            )
-
-        if not confidence_values:
+        if not values:
             return 0.50
 
-        confidence = float(
-            np.mean(
-                confidence_values
-            )
-        )
-
-        # 危険状態では安全判断の信頼度を高くする
-        if safety_state.must_stop:
-            confidence = max(
-                confidence,
-                0.90,
-            )
-
         return clamp(
-            confidence,
+            float(
+                np.mean(
+                    values
+                )
+            ),
             0.0,
             1.0,
         )
 
     # ========================================================
-    # 推奨理由生成
+    # 理由
     # ========================================================
 
-    def _build_recommendation_reason(
+    def _build_reason(
         self,
-        wall_state: WallState,
         obstacle_state: ObstacleState,
         course_state: CourseState,
         safety_state: SafetyState,
     ) -> str:
-        """
-        デバッグ・ログ用の理由を生成する。
-        """
 
         if safety_state.must_stop:
             return "緊急停止"
 
         if course_state.dead_end:
-            if safety_state.escape_direction:
-                return (
-                    f"行き止まり回避:"
-                    f"{safety_state.escape_direction}"
-                )
-
             return "行き止まり"
 
         if obstacle_state.detected:
-
             if safety_state.escape_direction:
                 return (
-                    f"障害物回避:"
-                    f"{safety_state.escape_direction}"
+                    "障害物回避:"
+                    +
+                    safety_state.escape_direction
                 )
 
-            return "障害物検出"
+            return "障害物"
 
         if course_state.corner_detected:
-
-            if course_state.corner_direction:
-                return (
-                    f"コーナー:"
-                    f"{course_state.corner_direction}"
+            return (
+                "コーナー:"
+                +
+                str(
+                    course_state.corner_direction
                 )
-
-            return "コーナー"
-
-        if course_state.intersection:
-            return "交差点"
+            )
 
         if course_state.left_open:
             return "左側が広い"
@@ -2668,20 +2530,243 @@ class Perception:
         if course_state.right_open:
             return "右側が広い"
 
-        if (
-            abs(
-                course_state.center_offset
-            )
-            > 0.20
-        ):
-            if course_state.center_offset < 0:
-                return "左寄り補正"
-
-            return "右寄り補正"
-
         return "通常走行"
-            # ========================================================
-    # センサー信頼度統合
+
+    # ========================================================
+    # カメラ標準化
+    # ========================================================
+
+    def normalize_camera_data(
+        self,
+        camera_data: Optional[
+            Dict[str, Any]
+        ],
+    ) -> Dict[str, Any]:
+
+        if not camera_data:
+            return {}
+
+        result = dict(
+            camera_data
+        )
+
+        for key in (
+            "left_confidence",
+            "right_confidence",
+            "front_confidence",
+            "direction_confidence",
+            "corner_confidence",
+            "obstacle_confidence",
+        ):
+            result[key] = clamp(
+                safe_float(
+                    result.get(
+                        key,
+                        0.0,
+                    ),
+                    0.0,
+                ),
+                0.0,
+                1.0,
+            )
+
+        result["direction"] = (
+            self._convert_direction_value(
+                result.get(
+                    "direction",
+                    0.0,
+                )
+            )
+        )
+
+        corner = result.get(
+            "corner"
+        )
+
+        if corner not in (
+            "left",
+            "right",
+            None,
+        ):
+            result["corner"] = None
+
+        return result
+
+    # ========================================================
+    # YOLO標準化
+    # ========================================================
+
+    def normalize_yolo_data(
+        self,
+        yolo_data: Optional[
+            Dict[str, Any]
+        ],
+    ) -> Dict[str, Any]:
+
+        if not yolo_data:
+            return {
+                "detections": []
+            }
+
+        detections = yolo_data.get(
+            "detections",
+            [],
+        )
+
+        if not isinstance(
+            detections,
+            list,
+        ):
+            detections = []
+
+        normalized = []
+
+        for detection in detections:
+
+            if not isinstance(
+                detection,
+                dict,
+            ):
+                continue
+
+            item = dict(
+                detection
+            )
+
+            item["confidence"] = clamp(
+                safe_float(
+                    item.get(
+                        "confidence",
+                        0.0,
+                    ),
+                    0.0,
+                ),
+                0.0,
+                1.0,
+            )
+
+            item["x_center"] = clamp(
+                safe_float(
+                    item.get(
+                        "x_center",
+                        0.5,
+                    ),
+                    0.5,
+                ),
+                0.0,
+                1.0,
+            )
+
+            item["y_center"] = clamp(
+                safe_float(
+                    item.get(
+                        "y_center",
+                        0.5,
+                    ),
+                    0.5,
+                ),
+                0.0,
+                1.0,
+            )
+
+            normalized.append(
+                item
+            )
+
+        return {
+            "detections":
+                normalized
+        }
+
+    # ========================================================
+    # normalized update
+    # ========================================================
+
+    def update_normalized(
+        self,
+        ultrasonic_data: Optional[
+            Dict[str, Any]
+        ] = None,
+        camera_data: Optional[
+            Dict[str, Any]
+        ] = None,
+        lidar_data: Optional[
+            Dict[str, Any]
+        ] = None,
+        yolo_data: Optional[
+            Dict[str, Any]
+        ] = None,
+    ) -> PerceptionResult:
+
+        return self.update(
+            ultrasonic_data=ultrasonic_data,
+            camera_data=self.normalize_camera_data(
+                camera_data
+            ),
+            lidar_data=lidar_data,
+            yolo_data=self.normalize_yolo_data(
+                yolo_data
+            ),
+        )
+
+    # ========================================================
+    # 方向平滑化
+    # ========================================================
+
+    def stabilize_direction(
+        self,
+        direction: float,
+    ) -> float:
+
+        self._direction_history.append(
+            clamp(
+                direction,
+                -1.0,
+                1.0,
+            )
+        )
+
+        if (
+            len(
+                self._direction_history
+            )
+            >
+            self.history_size
+        ):
+            del self._direction_history[0]
+
+        if not self._direction_history:
+            return direction
+
+        weights = np.arange(
+            1,
+            len(
+                self._direction_history
+            ) + 1,
+            dtype=np.float32,
+        )
+
+        values = np.asarray(
+            self._direction_history,
+            dtype=np.float32,
+        )
+
+        return clamp(
+            float(
+                np.sum(
+                    values * weights
+                )
+                /
+                np.sum(
+                    weights
+                )
+            ),
+            -1.0,
+            1.0,
+        )
+
+    # ========================================================
+    # センサー信頼度
     # ========================================================
 
     def fuse_sensor_confidence(
@@ -2691,156 +2776,100 @@ class Perception:
         lidar_confidence: float = 0.0,
         yolo_confidence: float = 0.0,
     ) -> float:
-        """
-        複数センサーの信頼度を統合する。
 
-        それぞれのセンサーの信頼度を重み付きで統合する。
+        weights = {
+            "ultrasonic":
+                float(
+                    get_config(
+                        "PERCEPTION_ULTRASONIC_CONFIDENCE_WEIGHT",
+                        0.50,
+                    )
+                ),
 
-        今後センサーを増やしても、
-        この関数に追加すれば対応できる。
-        """
+            "camera":
+                float(
+                    get_config(
+                        "PERCEPTION_CAMERA_CONFIDENCE_WEIGHT",
+                        0.30,
+                    )
+                ),
 
-        ultrasonic_weight = clamp(
-            float(
-                get_config(
-                    "PERCEPTION_ULTRASONIC_CONFIDENCE_WEIGHT",
-                    0.45,
-                )
-            ),
-            0.0,
-            1.0,
+            "lidar":
+                float(
+                    get_config(
+                        "PERCEPTION_LIDAR_CONFIDENCE_WEIGHT",
+                        0.10,
+                    )
+                ),
+
+            "yolo":
+                float(
+                    get_config(
+                        "PERCEPTION_YOLO_CONFIDENCE_WEIGHT",
+                        0.10,
+                    )
+                ),
+        }
+
+        values = {
+            "ultrasonic":
+                clamp(
+                    ultrasonic_confidence,
+                    0.0,
+                    1.0,
+                ),
+
+            "camera":
+                clamp(
+                    camera_confidence,
+                    0.0,
+                    1.0,
+                ),
+
+            "lidar":
+                clamp(
+                    lidar_confidence,
+                    0.0,
+                    1.0,
+                ),
+
+            "yolo":
+                clamp(
+                    yolo_confidence,
+                    0.0,
+                    1.0,
+                ),
+        }
+
+        total = sum(
+            max(
+                0.0,
+                weight,
+            )
+            for weight in weights.values()
         )
 
-        camera_weight = clamp(
-            float(
-                get_config(
-                    "PERCEPTION_CAMERA_CONFIDENCE_WEIGHT",
-                    0.30,
-                )
-            ),
-            0.0,
-            1.0,
-        )
-
-        lidar_weight = clamp(
-            float(
-                get_config(
-                    "PERCEPTION_LIDAR_CONFIDENCE_WEIGHT",
-                    0.15,
-                )
-            ),
-            0.0,
-            1.0,
-        )
-
-        yolo_weight = clamp(
-            float(
-                get_config(
-                    "PERCEPTION_YOLO_CONFIDENCE_WEIGHT",
-                    0.10,
-                )
-            ),
-            0.0,
-            1.0,
-        )
-
-        total_weight = (
-            ultrasonic_weight
-            + camera_weight
-            + lidar_weight
-            + yolo_weight
-        )
-
-        if total_weight <= 0:
+        if total <= 0:
             return 0.0
 
-        confidence = (
-            safe_float(
-                ultrasonic_confidence,
+        result = sum(
+            values[key]
+            *
+            max(
                 0.0,
+                weights[key],
             )
-            * ultrasonic_weight
-            +
-            safe_float(
-                camera_confidence,
-                0.0,
-            )
-            * camera_weight
-            +
-            safe_float(
-                lidar_confidence,
-                0.0,
-            )
-            * lidar_weight
-            +
-            safe_float(
-                yolo_confidence,
-                0.0,
-            )
-            * yolo_weight
+            for key in weights
         )
 
         return clamp(
-            confidence / total_weight,
+            result / total,
             0.0,
             1.0,
         )
 
     # ========================================================
-    # センサー矛盾検出
-    # ========================================================
-
-    def detect_sensor_conflict(
-        self,
-        ultrasonic_distance: Optional[float],
-        camera_distance: Optional[float],
-        tolerance: float = 300.0,
-    ) -> bool:
-        """
-        超音波とカメラの距離推定が大きく食い違っているか確認する。
-
-        例:
-
-            超音波: 300mm
-            カメラ: 900mm
-
-        のような場合は、
-        カメラまたは超音波のどちらかに
-        問題がある可能性がある。
-        """
-
-        if (
-            ultrasonic_distance is None
-            or camera_distance is None
-        ):
-            return False
-
-        ultrasonic_value = safe_float(
-            ultrasonic_distance,
-            -1.0,
-        )
-
-        camera_value = safe_float(
-            camera_distance,
-            -1.0,
-        )
-
-        if (
-            ultrasonic_value < 0
-            or camera_value < 0
-        ):
-            return False
-
-        return (
-            abs(
-                ultrasonic_value
-                - camera_value
-            )
-            > tolerance
-        )
-
-    # ========================================================
-    # 壁角度推定
+    # 壁角度
     # ========================================================
 
     def estimate_wall_angle(
@@ -2849,28 +2878,13 @@ class Perception:
         rear_side_distance: float,
         side: str,
     ) -> float:
-        """
-        前後2点の距離から壁の角度を推定する。
 
-        Returns:
-            rad（ラジアン）
-
-        0:
-            車体と壁がほぼ平行
-
-        正:
-            一方向へ開いている
-
-        負:
-            反対方向へ開いている
-        """
-
-        front_distance = safe_float(
+        front = safe_float(
             front_side_distance,
             self.default_distance,
         )
 
-        rear_distance = safe_float(
+        rear = safe_float(
             rear_side_distance,
             self.default_distance,
         )
@@ -2894,24 +2908,25 @@ class Perception:
         if side == "right":
 
             dx = (
-                front_distance * sin45
-                - rear_distance
-            )
-
-            dy = (
-                front_distance * cos45
+                front
+                * sin45
+                -
+                rear
             )
 
         else:
 
             dx = (
-                -front_distance * sin45
-                + rear_distance
+                -front
+                * sin45
+                +
+                rear
             )
 
-            dy = (
-                front_distance * cos45
-            )
+        dy = (
+            front
+            * cos45
+        )
 
         if abs(dy) < 1e-6:
             return 0.0
@@ -2922,398 +2937,82 @@ class Perception:
         )
 
     # ========================================================
-    # 壁角度による操舵補正
+    # モード補正
     # ========================================================
 
-    def wall_angle_steering_correction(
+    def apply_mode_correction(
         self,
-        wall_angle: float,
-        side: str,
+        base_steering: float,
+        mode: str,
+        result: Optional[
+            PerceptionResult
+        ] = None,
     ) -> float:
-        """
-        壁の角度から操舵補正値を作る。
 
-        これは今後のwall_followやPIDと
-        組み合わせることを想定している。
-        """
+        if result is None:
+            result = self.result
 
-        gain = float(
-            get_config(
-                "PERCEPTION_WALL_ANGLE_GAIN",
-                1.0,
-            )
-        )
-
-        correction = (
-            wall_angle
-            * gain
-        )
-
-        if side == "left":
-            correction *= -1.0
-
-        return clamp(
-            correction,
+        steering = clamp(
+            safe_float(
+                base_steering,
+                0.0,
+            ),
             -1.0,
             1.0,
         )
 
-    # ========================================================
-    # 左右回避安全度
-    # ========================================================
-
-    def calculate_escape_score(
-        self,
-        left_distance: float,
-        right_distance: float,
-        left_wall: bool = False,
-        right_wall: bool = False,
-    ) -> Tuple[float, float]:
-        """
-        左右それぞれの「逃げやすさ」を計算する。
-
-        Returns:
-            (left_score, right_score)
-
-        0.0:
-            危険
-
-        1.0:
-            安全
-        """
-
-        left = safe_float(
-            left_distance,
-            0.0,
-        )
-
-        right = safe_float(
-            right_distance,
-            0.0,
-        )
-
-        reference = float(
-            get_config(
-                "PERCEPTION_ESCAPE_REFERENCE",
-                1000.0,
+        mode_name = (
+            str(
+                mode
+                if mode is not None
+                else ""
             )
-        )
-
-        if reference <= 0:
-            reference = 1000.0
-
-        left_score = clamp(
-            left / reference,
-            0.0,
-            1.0,
-        )
-
-        right_score = clamp(
-            right / reference,
-            0.0,
-            1.0,
-        )
-
-        if left_wall:
-            left_score *= 0.25
-
-        if right_wall:
-            right_score *= 0.25
-
-        return (
-            left_score,
-            right_score,
-        )
-
-    # ========================================================
-    # 最も安全な方向
-    # ========================================================
-
-    def get_safest_direction(
-        self,
-        left_distance: float,
-        front_distance: float,
-        right_distance: float,
-    ) -> Optional[str]:
-        """
-        左右＋前の距離から最も安全な方向を返す。
-
-        Returns:
-            "left"
-            "right"
-            "center"
-            None
-        """
-
-        left = safe_float(
-            left_distance,
-            0.0,
-        )
-
-        front = safe_float(
-            front_distance,
-            0.0,
-        )
-
-        right = safe_float(
-            right_distance,
-            0.0,
-        )
-
-        if (
-            left <= 0
-            and front <= 0
-            and right <= 0
-        ):
-            return None
-
-        if (
-            front > left
-            and front > right
-        ):
-            return "center"
-
-        if left >= right:
-            return "left"
-
-        return "right"
-
-    # ========================================================
-    # センサー異常検出
-    # ========================================================
-
-    def validate_distance(
-        self,
-        value: Any,
-        minimum: float = 0.0,
-        maximum: float = 5000.0,
-    ) -> bool:
-        """
-        距離データが正常範囲か確認する。
-        """
-
-        try:
-            distance = float(value)
-        except (
-            TypeError,
-            ValueError,
-        ):
-            return False
-
-        if not math.isfinite(
-            distance
-        ):
-            return False
-
-        return (
-            minimum
-            <= distance
-            <= maximum
-        )
-
-    # ========================================================
-    # センサー値の異常補正
-    # ========================================================
-
-    def sanitize_distance(
-        self,
-        value: Any,
-        default: Optional[float] = None,
-    ) -> float:
-        """
-        異常な距離値を安全な値に変換する。
-        """
-
-        if default is None:
-            default = self.default_distance
-
-        if not self.validate_distance(
-            value
-        ):
-            return default
-
-        return float(
-            value
-        )
-
-    # ========================================================
-    # カメラ情報の標準化
-    # ========================================================
-
-    def normalize_camera_data(
-        self,
-        camera_data: Optional[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        """
-        カメラ側の実装が変わっても、
-        perception.py内部では同じ形式で扱えるようにする。
-
-        将来、
-
-            OpenCV
-            DonkeyCar
-            ResNet
-            MobileViT
-            EdgeNeXt
-            GRU
-            TCN
-            Causal CNN
-            YOLO
-
-        のどれを使っても、
-        ここで共通形式に変換する。
-        """
-
-        if not camera_data:
-            return {}
-
-        normalized: Dict[str, Any] = {}
-
-        # ----------------------------------------------------
-        # 壁
-        # ----------------------------------------------------
-
-        normalized["left_wall"] = safe_bool(
-            camera_data.get(
-                "left_wall",
-                False,
-            )
-        )
-
-        normalized["right_wall"] = safe_bool(
-            camera_data.get(
-                "right_wall",
-                False,
-            )
-        )
-
-        normalized["front_wall"] = safe_bool(
-            camera_data.get(
-                "front_wall",
-                False,
-            )
-        )
-
-        # ----------------------------------------------------
-        # 信頼度
-        # ----------------------------------------------------
-
-        normalized["left_confidence"] = clamp(
-            safe_float(
-                camera_data.get(
-                    "left_confidence",
-                    0.0,
-                ),
-                0.0,
-            ),
-            0.0,
-            1.0,
-        )
-
-        normalized["right_confidence"] = clamp(
-            safe_float(
-                camera_data.get(
-                    "right_confidence",
-                    0.0,
-                ),
-                0.0,
-            ),
-            0.0,
-            1.0,
-        )
-
-        normalized["front_confidence"] = clamp(
-            safe_float(
-                camera_data.get(
-                    "front_confidence",
-                    0.0,
-                ),
-                0.0,
-            ),
-            0.0,
-            1.0,
-        )
-
-        # ----------------------------------------------------
-        # 方向
-        # ----------------------------------------------------
-
-        normalized["direction"] = (
-            self._convert_direction_value(
-                camera_data.get(
-                    "direction",
-                    0.0,
-                )
-            )
-        )
-
-        normalized["direction_confidence"] = clamp(
-            safe_float(
-                camera_data.get(
-                    "direction_confidence",
-                    camera_data.get(
-                        "confidence",
-                        0.0,
-                    ),
-                ),
-                0.0,
-            ),
-            0.0,
-            1.0,
-        )
-
-        # ----------------------------------------------------
-        # コーナー
-        # ----------------------------------------------------
-
-        corner = camera_data.get(
-            "corner"
-        )
-
-        if (
-            isinstance(
-                corner,
-                str,
-            )
-            and corner.lower()
-            in (
-                "left",
-                "right",
-            )
-        ):
-            normalized["corner"] = (
-                corner.lower()
-            )
-        else:
-            normalized["corner"] = None
-
-        normalized["corner_confidence"] = clamp(
-            safe_float(
-                camera_data.get(
-                    "corner_confidence",
-                    0.0,
-                ),
-                0.0,
-            ),
-            0.0,
-            1.0,
+            .lower()
         )
 
         # ----------------------------------------------------
         # 障害物
         # ----------------------------------------------------
 
-        normalized["obstacle"] = safe_bool(
-            camera_data.get(
-                "obstacle",
-                False,
+        if result.obstacle.detected:
+
+            gain = clamp(
+                float(
+                    get_config(
+                        "PERCEPTION_MODE_OBSTACLE_CORRECTION_GAIN",
+                        0.35,
+                    )
+                ),
+                0.0,
+                1.0,
+            )
+
+            if (
+                result.safety.escape_direction
+                == "left"
+            ):
+                steering -= gain
+
+            elif (
+                result.safety.escape_direction
+                == "right"
+            ):
+                steering += gain
+
+        # ----------------------------------------------------
+        # カメラ方向補正
+        # ----------------------------------------------------
+
+        camera_direction = (
+            result.camera_raw.get(
+                "direction"
             )
         )
 
-        normalized["obstacle_confidence"] = clamp(
+        camera_confidence = clamp(
             safe_float(
-                camera_data.get(
-                    "obstacle_confidence",
+                result.camera_raw.get(
+                    "direction_confidence",
                     0.0,
                 ),
                 0.0,
@@ -3322,249 +3021,388 @@ class Perception:
             1.0,
         )
 
-        normalized["obstacle_type"] = (
-            camera_data.get(
-                "obstacle_type"
-            )
-        )
-
-        # ----------------------------------------------------
-        # 行き止まり・交差点
-        # ----------------------------------------------------
-
-        normalized["dead_end"] = safe_bool(
-            camera_data.get(
-                "dead_end",
-                False,
-            )
-        )
-
-        normalized["intersection"] = safe_bool(
-            camera_data.get(
-                "intersection",
-                False,
-            )
-        )
-
-        # ----------------------------------------------------
-        # 壁角度
-        # ----------------------------------------------------
-
-        normalized["left_angle"] = safe_float(
-            camera_data.get(
-                "left_angle",
-                0.0,
+        camera_gain = clamp(
+            float(
+                get_config(
+                    "PERCEPTION_MODE_CAMERA_CORRECTION_GAIN",
+                    0.20,
+                )
             ),
             0.0,
+            1.0,
         )
 
-        normalized["right_angle"] = safe_float(
-            camera_data.get(
-                "right_angle",
-                0.0,
-            ),
-            0.0,
-        )
-
-        # ----------------------------------------------------
-        # 推定距離
-        # ----------------------------------------------------
-
-        normalized["left_distance"] = (
-            self.sanitize_distance(
-                camera_data.get(
-                    "left_distance"
-                ),
-                self.default_distance,
-            )
-            if camera_data.get(
-                "left_distance"
-            ) is not None
-            else None
-        )
-
-        normalized["front_distance"] = (
-            self.sanitize_distance(
-                camera_data.get(
-                    "front_distance"
-                ),
-                self.default_distance,
-            )
-            if camera_data.get(
-                "front_distance"
-            ) is not None
-            else None
-        )
-
-        normalized["right_distance"] = (
-            self.sanitize_distance(
-                camera_data.get(
-                    "right_distance"
-                ),
-                self.default_distance,
-            )
-            if camera_data.get(
-                "right_distance"
-            ) is not None
-            else None
-        )
-
-        return normalized
-
-    # ========================================================
-    # YOLO結果の標準化
-    # ========================================================
-
-    def normalize_yolo_data(
-        self,
-        yolo_data: Optional[Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        """
-        YOLO等の物体検出結果を
-        perception.py共通形式へ変換する。
-        """
-
-        if not yolo_data:
-            return {
-                "detections": []
-            }
-
-        detections = yolo_data.get(
-            "detections",
-            []
-        )
-
-        if not isinstance(
-            detections,
-            list,
+        if (
+            camera_direction is not None
+            and
+            camera_confidence
+            >=
+            self.camera_confidence_threshold
         ):
-            detections = []
 
-        normalized_detections = []
+            steering += (
+                self._convert_direction_value(
+                    camera_direction
+                )
+                *
+                camera_confidence
+                *
+                camera_gain
+            )
 
-        for detection in detections:
+        # ----------------------------------------------------
+        # コーナー補正
+        # ----------------------------------------------------
 
-            if not isinstance(
-                detection,
-                dict,
+        if result.course.corner_detected:
+
+            corner_gain = clamp(
+                float(
+                    get_config(
+                        "PERCEPTION_MODE_CORNER_CORRECTION_GAIN",
+                        0.20,
+                    )
+                ),
+                0.0,
+                1.0,
+            )
+
+            if (
+                result.course.corner_direction
+                == "left"
             ):
-                continue
+                steering -= corner_gain
 
-            normalized_detections.append(
-                {
-                    "class_name":
-                        detection.get(
-                            "class_name",
-                            detection.get(
-                                "class",
-                                "unknown",
-                            ),
-                        ),
+            elif (
+                result.course.corner_direction
+                == "right"
+            ):
+                steering += corner_gain
 
-                    "confidence":
-                        clamp(
-                            safe_float(
-                                detection.get(
-                                    "confidence",
-                                    0.0,
-                                ),
-                                0.0,
-                            ),
-                            0.0,
-                            1.0,
-                        ),
+        # ----------------------------------------------------
+        # wall_follow系
+        # ----------------------------------------------------
 
-                    "x_center":
-                        safe_float(
-                            detection.get(
-                                "x_center",
-                                0.5,
-                            ),
-                            0.5,
-                        ),
+        if mode_name in (
+            "wall_follow",
+            "wall_follow_pid",
+        ):
 
-                    "y_center":
-                        safe_float(
-                            detection.get(
-                                "y_center",
-                                0.5,
-                            ),
-                            0.5,
-                        ),
+            gain = clamp(
+                float(
+                    get_config(
+                        "PERCEPTION_WALL_CORRECTION_GAIN",
+                        0.12,
+                    )
+                ),
+                0.0,
+                1.0,
+            )
 
-                    "width":
-                        safe_float(
-                            detection.get(
-                                "width",
-                                0.0,
-                            ),
-                            0.0,
-                        ),
+            steering += (
+                result.course.center_offset
+                *
+                gain
+            )
 
-                    "height":
-                        safe_float(
-                            detection.get(
-                                "height",
-                                0.0,
-                            ),
-                            0.0,
-                        ),
-                }
+        # ----------------------------------------------------
+        # center_follow
+        # ----------------------------------------------------
+
+        elif mode_name == "center_follow_pid":
+
+            gain = clamp(
+                float(
+                    get_config(
+                        "PERCEPTION_CENTER_CORRECTION_GAIN",
+                        0.15,
+                    )
+                ),
+                0.0,
+                1.0,
+            )
+
+            steering += (
+                result.course.center_offset
+                *
+                gain
+            )
+
+        # ----------------------------------------------------
+        # racer / gap
+        # ----------------------------------------------------
+
+        elif mode_name in (
+            "racer",
+            "gap_follow",
+            "follow_the_gap",
+        ):
+
+            gain = clamp(
+                float(
+                    get_config(
+                        "PERCEPTION_HIGH_SPEED_CORRECTION_GAIN",
+                        0.10,
+                    )
+                ),
+                0.0,
+                1.0,
+            )
+
+            steering += (
+                result.course.direction
+                *
+                gain
+            )
+
+        if result.safety.must_stop:
+            steering = 0.0
+
+        return clamp(
+            steering,
+            -1.0,
+            1.0,
+        )
+
+    # ========================================================
+    # 速度補正
+    # ========================================================
+
+    def apply_speed_correction(
+        self,
+        base_throttle: float,
+        mode: str,
+        result: Optional[
+            PerceptionResult
+        ] = None,
+    ) -> float:
+
+        if result is None:
+            result = self.result
+
+        throttle = clamp(
+            safe_float(
+                base_throttle,
+                0.0,
+            ),
+            0.0,
+            1.0,
+        )
+
+        if result.safety.must_stop:
+            return 0.0
+
+        # ----------------------------------------------------
+        # 危険度
+        # ----------------------------------------------------
+
+        danger_gain = clamp(
+            float(
+                get_config(
+                    "PERCEPTION_MODE_DANGER_SPEED_GAIN",
+                    0.40,
+                )
+            ),
+            0.0,
+            1.0,
+        )
+
+        throttle *= (
+            1.0
+            -
+            result.safety.danger_level
+            *
+            danger_gain
+        )
+
+        # ----------------------------------------------------
+        # コーナー
+        # ----------------------------------------------------
+
+        if result.course.corner_detected:
+
+            corner_factor = clamp(
+                float(
+                    get_config(
+                        "PERCEPTION_MODE_CORNER_SPEED_FACTOR",
+                        0.75,
+                    )
+                ),
+                0.0,
+                1.0,
+            )
+
+            throttle *= (
+                corner_factor
+            )
+
+        # ----------------------------------------------------
+        # 障害物
+        # ----------------------------------------------------
+
+        if result.obstacle.detected:
+
+            obstacle_factor = clamp(
+                float(
+                    get_config(
+                        "PERCEPTION_MODE_OBSTACLE_SPEED_FACTOR",
+                        0.60,
+                    )
+                ),
+                0.0,
+                1.0,
+            )
+
+            throttle *= (
+                obstacle_factor
+            )
+
+        # ----------------------------------------------------
+        # 最終
+        # ----------------------------------------------------
+
+        return clamp(
+            throttle,
+            0.0,
+            1.0,
+        )
+
+    # ========================================================
+    # Planner接続
+    # ========================================================
+
+    def get_planner_input(
+        self,
+        mode: Optional[str] = None,
+        base_steering: Optional[float] = None,
+        base_throttle: Optional[float] = None,
+    ) -> Dict[str, Any]:
+
+        result = self.result
+
+        if base_steering is None:
+            steering = (
+                result.recommendation.steering
+            )
+
+        else:
+            steering = safe_float(
+                base_steering,
+                0.0,
+            )
+
+        if base_throttle is None:
+            throttle = (
+                result.recommendation.throttle
+            )
+
+        else:
+            throttle = safe_float(
+                base_throttle,
+                0.0,
+            )
+
+        if mode is not None:
+
+            steering = (
+                self.apply_mode_correction(
+                    steering,
+                    mode,
+                    result,
+                )
+            )
+
+            throttle = (
+                self.apply_speed_correction(
+                    throttle,
+                    mode,
+                    result,
+                )
             )
 
         return {
-            "detections":
-                normalized_detections
+            "steering":
+                clamp(
+                    steering,
+                    -1.0,
+                    1.0,
+                ),
+
+            "throttle":
+                clamp(
+                    throttle,
+                    0.0,
+                    1.0,
+                ),
+
+            "direction":
+                result.course.direction,
+
+            "center_offset":
+                result.course.center_offset,
+
+            "left_distance":
+                result.wall.left_distance,
+
+            "front_distance":
+                result.wall.front_distance,
+
+            "right_distance":
+                result.wall.right_distance,
+
+            "left_wall":
+                result.wall.left_detected,
+
+            "right_wall":
+                result.wall.right_detected,
+
+            "front_wall":
+                result.wall.front_detected,
+
+            "corner":
+                result.course.corner_direction,
+
+            "corner_detected":
+                result.course.corner_detected,
+
+            "obstacle":
+                result.obstacle.detected,
+
+            "obstacle_left":
+                result.obstacle.left,
+
+            "obstacle_center":
+                result.obstacle.center,
+
+            "obstacle_right":
+                result.obstacle.right,
+
+            "danger_level":
+                result.safety.danger_level,
+
+            "must_stop":
+                result.safety.must_stop,
+
+            "must_slow_down":
+                result.safety.must_slow_down,
+
+            "escape_direction":
+                result.safety.escape_direction,
+
+            "confidence":
+                result.recommendation.confidence,
+
+            "reason":
+                result.recommendation.reason,
         }
 
     # ========================================================
-    # 認識情報の更新（標準化版）
+    # デバッグ
     # ========================================================
 
-    def update_normalized(
+    def get_debug_summary(
         self,
-        ultrasonic_data: Optional[Dict[str, Any]] = None,
-        camera_data: Optional[Dict[str, Any]] = None,
-        lidar_data: Optional[Dict[str, Any]] = None,
-        yolo_data: Optional[Dict[str, Any]] = None,
-    ) -> PerceptionResult:
-        """
-        update()の前段階で
-        カメラ・YOLOの入力を標準化する。
-
-        今後、認識エンジンを変更しても
-        Perception本体を変更しなくて済むようにする。
-        """
-
-        normalized_camera = (
-            self.normalize_camera_data(
-                camera_data
-            )
-        )
-
-        normalized_yolo = (
-            self.normalize_yolo_data(
-                yolo_data
-            )
-        )
-
-        return self.update(
-            ultrasonic_data=ultrasonic_data,
-            camera_data=normalized_camera,
-            lidar_data=lidar_data,
-            yolo_data=normalized_yolo,
-        )
-
-    # ========================================================
-    # デバッグ情報取得
-    # ========================================================
-
-    def get_debug_summary(self) -> Dict[str, Any]:
-        """
-        現在の認識状態を辞書で返す。
-
-        ログ・CSV・ブラウザモニターなどに利用できる。
-        """
+    ) -> Dict[str, Any]:
 
         result = self.result
 
@@ -3590,11 +3428,11 @@ class Perception:
             "right_wall":
                 result.wall.right_detected,
 
-            "obstacle":
-                result.obstacle.detected,
+            "direction":
+                result.course.direction,
 
-            "obstacle_type":
-                result.obstacle.object_type,
+            "center_offset":
+                result.course.center_offset,
 
             "corner":
                 result.course.corner_direction,
@@ -3605,26 +3443,20 @@ class Perception:
             "intersection":
                 result.course.intersection,
 
-            "direction":
-                result.course.direction,
+            "obstacle":
+                result.obstacle.detected,
 
-            "center_offset":
-                result.course.center_offset,
-
-            "course_width":
-                result.course.estimated_width,
+            "obstacle_source":
+                result.obstacle.source,
 
             "danger_level":
                 result.safety.danger_level,
 
-            "collision_risk":
-                result.safety.collision_risk,
+            "must_stop":
+                result.safety.must_stop,
 
             "must_slow_down":
                 result.safety.must_slow_down,
-
-            "must_stop":
-                result.safety.must_stop,
 
             "escape_direction":
                 result.safety.escape_direction,
@@ -3635,26 +3467,18 @@ class Perception:
             "recommended_throttle":
                 result.recommendation.throttle,
 
-            "recommendation_confidence":
-                result.recommendation.confidence,
-
-            "recommendation_reason":
+            "reason":
                 result.recommendation.reason,
         }
 
     # ========================================================
-    # デバッグ表示
+    # Debug print
     # ========================================================
 
     def log_debug_summary(
         self,
         force: bool = False,
     ) -> None:
-        """
-        認識状態をログへ出力する。
-
-        PERCEPTION_DEBUGがFalseなら通常は出力しない。
-        """
 
         enabled = safe_bool(
             get_config(
@@ -3665,7 +3489,8 @@ class Perception:
 
         if (
             not enabled
-            and not force
+            and
+            not force
         ):
             return
 
@@ -3675,57 +3500,49 @@ class Perception:
 
         logger.info(
             "PERCEPTION | "
-            "L=%.0f "
-            "F=%.0f "
-            "R=%.0f | "
-            "dir=%.2f "
-            "steer=%.2f "
-            "throttle=%.2f | "
-            "danger=%.2f | "
+            "L=%.0f F=%.0f R=%.0f | "
+            "dir=%.2f center=%.2f | "
+            "steer=%.2f throttle=%.2f | "
+            "obstacle=%s danger=%.2f | "
             "reason=%s",
             safe_float(
-                summary["left_distance"],
-                0.0,
+                summary["left_distance"]
             ),
             safe_float(
-                summary["front_distance"],
-                0.0,
+                summary["front_distance"]
             ),
             safe_float(
-                summary["right_distance"],
-                0.0,
+                summary["right_distance"]
             ),
             safe_float(
-                summary["direction"],
-                0.0,
+                summary["direction"]
             ),
             safe_float(
-                summary["recommended_steering"],
-                0.0,
+                summary["center_offset"]
             ),
             safe_float(
-                summary["recommended_throttle"],
-                0.0,
+                summary["recommended_steering"]
             ),
             safe_float(
-                summary["danger_level"],
-                0.0,
+                summary["recommended_throttle"]
             ),
-            summary["recommendation_reason"],
+            summary["obstacle"],
+            safe_float(
+                summary["danger_level"]
+            ),
+            summary["reason"],
         )
 
     # ========================================================
-    # 結果を辞書へ変換
+    # Dictionary
     # ========================================================
 
     def to_dict(
         self,
-        result: Optional[PerceptionResult] = None,
+        result: Optional[
+            PerceptionResult
+        ] = None,
     ) -> Dict[str, Any]:
-        """
-        PerceptionResultをJSON/CSV等で扱いやすい
-        辞書形式へ変換する。
-        """
 
         if result is None:
             result = self.result
@@ -3814,23 +3631,23 @@ class Perception:
                 "right_free_space":
                     result.course.right_free_space,
 
+                "center_offset":
+                    result.course.center_offset,
+
+                "estimated_width":
+                    result.course.estimated_width,
+
                 "corner_detected":
                     result.course.corner_detected,
 
                 "corner_direction":
                     result.course.corner_direction,
 
-                "dead_end":
-                    result.course.dead_end,
-
                 "intersection":
                     result.course.intersection,
 
-                "center_offset":
-                    result.course.center_offset,
-
-                "estimated_width":
-                    result.course.estimated_width,
+                "dead_end":
+                    result.course.dead_end,
             },
 
             "safety": {
@@ -3872,1182 +3689,12 @@ class Perception:
         }
 
     # ========================================================
-    # 状態リセット
+    # Status
     # ========================================================
 
-    def reset(self) -> None:
-        """
-        perceptionの状態を初期化する。
-        """
-
-        self.result = PerceptionResult()
-
-        self.last_update_time = (
-            time.perf_counter()
-        )
-
-        self.frame_count = 0
-
-        self.initialized = False
-
-        self._left_distance_history.clear()
-        self._front_distance_history.clear()
-        self._right_distance_history.clear()
-
-        logger.info(
-            "Perception state reset"
-        )
-            # ========================================================
-    # 高度センサーフュージョン
-    # ========================================================
-
-    def fuse_direction(
+    def get_status(
         self,
-        ultrasonic_direction: float,
-        camera_direction: Optional[float] = None,
-        lidar_direction: Optional[float] = None,
-        ai_direction: Optional[float] = None,
-        camera_confidence: float = 0.0,
-        lidar_confidence: float = 0.0,
-        ai_confidence: float = 0.0,
-    ) -> float:
-        """
-        複数の認識系から得られた進行方向を統合する。
-
-        direction:
-            -1.0 = 左
-             0.0 = 直進
-             1.0 = 右
-
-        AIやカメラが無い場合でも、
-        超音波だけで動作できる。
-
-        これにより、
-
-            超音波だけ
-            カメラだけ
-            超音波 + カメラ
-            超音波 + カメラ + AI
-            超音波 + カメラ + LiDAR
-
-        を同じインターフェースで扱える。
-        """
-
-        # ----------------------------------------------------
-        # ベース
-        # ----------------------------------------------------
-
-        values = [
-            (
-                clamp(
-                    safe_float(
-                        ultrasonic_direction,
-                        0.0,
-                    ),
-                    -1.0,
-                    1.0,
-                ),
-                float(
-                    get_config(
-                        "PERCEPTION_ULTRASONIC_DIRECTION_WEIGHT",
-                        0.50,
-                    )
-                ),
-            )
-        ]
-
-        # ----------------------------------------------------
-        # カメラ
-        # ----------------------------------------------------
-
-        if camera_direction is not None:
-            values.append(
-                (
-                    clamp(
-                        safe_float(
-                            camera_direction,
-                            0.0,
-                        ),
-                        -1.0,
-                        1.0,
-                    ),
-                    max(
-                        0.0,
-                        camera_confidence,
-                    )
-                    *
-                    float(
-                        get_config(
-                            "PERCEPTION_CAMERA_DIRECTION_WEIGHT",
-                            0.30,
-                        )
-                    ),
-                )
-            )
-
-        # ----------------------------------------------------
-        # LiDAR
-        # ----------------------------------------------------
-
-        if lidar_direction is not None:
-            values.append(
-                (
-                    clamp(
-                        safe_float(
-                            lidar_direction,
-                            0.0,
-                        ),
-                        -1.0,
-                        1.0,
-                    ),
-                    max(
-                        0.0,
-                        lidar_confidence,
-                    )
-                    *
-                    float(
-                        get_config(
-                            "PERCEPTION_LIDAR_DIRECTION_WEIGHT",
-                            0.15,
-                        )
-                    ),
-                )
-            )
-
-        # ----------------------------------------------------
-        # AI
-        # ----------------------------------------------------
-
-        if ai_direction is not None:
-            values.append(
-                (
-                    clamp(
-                        safe_float(
-                            ai_direction,
-                            0.0,
-                        ),
-                        -1.0,
-                        1.0,
-                    ),
-                    max(
-                        0.0,
-                        ai_confidence,
-                    )
-                    *
-                    float(
-                        get_config(
-                            "PERCEPTION_AI_DIRECTION_WEIGHT",
-                            0.25,
-                        )
-                    ),
-                )
-            )
-
-        # ----------------------------------------------------
-        # 重み付き平均
-        # ----------------------------------------------------
-
-        total_weight = sum(
-            weight
-            for _, weight in values
-            if weight > 0
-        )
-
-        if total_weight <= 0:
-            return 0.0
-
-        direction = sum(
-            value * weight
-            for value, weight in values
-            if weight > 0
-        ) / total_weight
-
-        return clamp(
-            direction,
-            -1.0,
-            1.0,
-        )
-
-    # ========================================================
-    # 時系列安定化
-    # ========================================================
-
-    def stabilize_direction(
-        self,
-        direction: float,
-    ) -> float:
-        """
-        進行方向を時間方向に平滑化する。
-
-        カメラAIなどのフレームごとの
-        小さな揺れを抑える。
-
-        例:
-
-            -0.20
-            -0.15
-            -0.30
-            -0.18
-
-        のような値を安定させる。
-        """
-
-        if not hasattr(
-            self,
-            "_direction_history",
-        ):
-            self._direction_history = []
-
-        history_size = int(
-            get_config(
-                "PERCEPTION_DIRECTION_HISTORY_SIZE",
-                5,
-            )
-        )
-
-        history_size = max(
-            1,
-            history_size,
-        )
-
-        value = clamp(
-            safe_float(
-                direction,
-                0.0,
-            ),
-            -1.0,
-            1.0,
-        )
-
-        self._direction_history.append(
-            value
-        )
-
-        if len(
-            self._direction_history
-        ) > history_size:
-            del self._direction_history[0]
-
-        # 最新値を強くする指数型に近い簡易重み
-        weighted_sum = 0.0
-        weight_sum = 0.0
-
-        for index, item in enumerate(
-            self._direction_history
-        ):
-            weight = float(
-                index + 1
-            )
-
-            weighted_sum += (
-                item * weight
-            )
-
-            weight_sum += weight
-
-        if weight_sum <= 0:
-            return value
-
-        return clamp(
-            weighted_sum / weight_sum,
-            -1.0,
-            1.0,
-        )
-
-    # ========================================================
-    # 速度の上限計算
-    # ========================================================
-
-    def calculate_speed_limit(
-        self,
-        front_distance: float,
-        steering: float,
-        danger_level: float,
-        corner_detected: bool = False,
-        obstacle_detected: bool = False,
-    ) -> float:
-        """
-        周囲の状況から速度上限を計算する。
-
-        戻り値:
-            0.0 ～ 1.0
-        """
-
-        max_speed = clamp(
-            float(
-                get_config(
-                    "PERCEPTION_MAX_THROTTLE",
-                    1.0,
-                )
-            ),
-            0.0,
-            1.0,
-        )
-
-        min_speed = clamp(
-            float(
-                get_config(
-                    "PERCEPTION_MIN_THROTTLE",
-                    0.20,
-                )
-            ),
-            0.0,
-            1.0,
-        )
-
-        speed = max_speed
-
-        # ----------------------------------------------------
-        # 前方距離
-        # ----------------------------------------------------
-
-        safe_front_reference = float(
-            get_config(
-                "PERCEPTION_SPEED_REFERENCE",
-                1500.0,
-            )
-        )
-
-        if safe_front_reference <= 0:
-            safe_front_reference = 1500.0
-
-        front_factor = clamp(
-            safe_float(
-                front_distance,
-                self.default_distance,
-            )
-            / safe_front_reference,
-            0.0,
-            1.0,
-        )
-
-        distance_weight = clamp(
-            float(
-                get_config(
-                    "PERCEPTION_FRONT_SPEED_WEIGHT",
-                    0.60,
-                )
-            ),
-            0.0,
-            1.0,
-        )
-
-        speed *= (
-            (1.0 - distance_weight)
-            +
-            distance_weight
-            * front_factor
-        )
-
-        # ----------------------------------------------------
-        # 操舵量
-        # ----------------------------------------------------
-
-        steering_slowdown = clamp(
-            float(
-                get_config(
-                    "PERCEPTION_STEERING_SLOWDOWN",
-                    0.35,
-                )
-            ),
-            0.0,
-            1.0,
-        )
-
-        speed *= (
-            1.0
-            -
-            steering_slowdown
-            * abs(steering)
-        )
-
-        # ----------------------------------------------------
-        # 危険度
-        # ----------------------------------------------------
-
-        danger_slowdown = clamp(
-            float(
-                get_config(
-                    "PERCEPTION_DANGER_SLOWDOWN",
-                    0.60,
-                )
-            ),
-            0.0,
-            1.0,
-        )
-
-        speed *= (
-            1.0
-            -
-            danger_slowdown
-            * clamp(
-                danger_level,
-                0.0,
-                1.0,
-            )
-        )
-
-        # ----------------------------------------------------
-        # コーナー
-        # ----------------------------------------------------
-
-        if corner_detected:
-
-            corner_factor = clamp(
-                float(
-                    get_config(
-                        "PERCEPTION_CORNER_SPEED_FACTOR",
-                        0.55,
-                    )
-                ),
-                0.0,
-                1.0,
-            )
-
-            speed *= corner_factor
-
-        # ----------------------------------------------------
-        # 障害物
-        # ----------------------------------------------------
-
-        if obstacle_detected:
-
-            obstacle_factor = clamp(
-                float(
-                    get_config(
-                        "PERCEPTION_OBSTACLE_SPEED_FACTOR",
-                        0.50,
-                    )
-                ),
-                0.0,
-                1.0,
-            )
-
-            speed *= obstacle_factor
-
-        return clamp(
-            speed,
-            min_speed,
-            max_speed,
-        )
-
-    # ========================================================
-    # モード用データ取得
-    # ========================================================
-
-    def get_mode_inputs(
-        self,
-        result: Optional[PerceptionResult] = None,
     ) -> Dict[str, Any]:
-        """
-        各走行モードが利用しやすい形で
-        perception情報を返す。
-
-        今後、
-
-            wall_follow
-            wall_follow_pid
-            center_follow_pid
-            gap_follow
-            racer
-            right_left_3
-            AI
-            camera
-
-        など、どのモードからでも共通して利用できる。
-        """
-
-        if result is None:
-            result = self.result
-
-        return {
-            # ------------------------------------------------
-            # 距離
-            # ------------------------------------------------
-
-            "left_distance":
-                result.wall.left_distance,
-
-            "front_distance":
-                result.wall.front_distance,
-
-            "right_distance":
-                result.wall.right_distance,
-
-            # ------------------------------------------------
-            # 壁
-            # ------------------------------------------------
-
-            "left_wall":
-                result.wall.left_detected,
-
-            "front_wall":
-                result.wall.front_detected,
-
-            "right_wall":
-                result.wall.right_detected,
-
-            # ------------------------------------------------
-            # 壁角度
-            # ------------------------------------------------
-
-            "left_wall_angle":
-                result.wall.left_angle,
-
-            "right_wall_angle":
-                result.wall.right_angle,
-
-            # ------------------------------------------------
-            # コース
-            # ------------------------------------------------
-
-            "direction":
-                result.course.direction,
-
-            "center_offset":
-                result.course.center_offset,
-
-            "course_width":
-                result.course.estimated_width,
-
-            "left_free_space":
-                result.course.left_free_space,
-
-            "right_free_space":
-                result.course.right_free_space,
-
-            "left_open":
-                result.course.left_open,
-
-            "right_open":
-                result.course.right_open,
-
-            "corner":
-                result.course.corner_direction,
-
-            "corner_detected":
-                result.course.corner_detected,
-
-            "intersection":
-                result.course.intersection,
-
-            "dead_end":
-                result.course.dead_end,
-
-            # ------------------------------------------------
-            # 障害物
-            # ------------------------------------------------
-
-            "obstacle":
-                result.obstacle.detected,
-
-            "obstacle_left":
-                result.obstacle.left,
-
-            "obstacle_center":
-                result.obstacle.center,
-
-            "obstacle_right":
-                result.obstacle.right,
-
-            "obstacle_distance":
-                result.obstacle.distance,
-
-            "obstacle_type":
-                result.obstacle.object_type,
-
-            "obstacle_confidence":
-                result.obstacle.confidence,
-
-            # ------------------------------------------------
-            # 安全
-            # ------------------------------------------------
-
-            "danger_level":
-                result.safety.danger_level,
-
-            "collision_risk":
-                result.safety.collision_risk,
-
-            "emergency":
-                result.safety.emergency,
-
-            "must_stop":
-                result.safety.must_stop,
-
-            "must_slow_down":
-                result.safety.must_slow_down,
-
-            "escape_direction":
-                result.safety.escape_direction,
-
-            # ------------------------------------------------
-            # 推奨値
-            # ------------------------------------------------
-
-            "recommended_steering":
-                result.recommendation.steering,
-
-            "recommended_throttle":
-                result.recommendation.throttle,
-
-            "confidence":
-                result.recommendation.confidence,
-
-            "reason":
-                result.recommendation.reason,
-        }
-
-    # ========================================================
-    # 走行モード向けステアリング補正
-    # ========================================================
-
-    def apply_mode_correction(
-        self,
-        base_steering: float,
-        mode: str,
-        result: Optional[PerceptionResult] = None,
-    ) -> float:
-        """
-        既存の走行方式に
-        perceptionの情報を追加するための共通関数。
-
-        例えば:
-
-            wall_follow
-                +
-            camera correction
-
-            racer
-                +
-            obstacle avoidance
-
-            center_follow_pid
-                +
-            camera corner detection
-
-        のような構成に使う。
-        """
-
-        if result is None:
-            result = self.result
-
-        steering = clamp(
-            safe_float(
-                base_steering,
-                0.0,
-            ),
-            -1.0,
-            1.0,
-        )
-
-        mode_name = str(
-            mode
-            if mode is not None
-            else ""
-        ).lower()
-
-        # ----------------------------------------------------
-        # 障害物
-        # ----------------------------------------------------
-
-        if result.obstacle.detected:
-
-            obstacle_gain = clamp(
-                float(
-                    get_config(
-                        "PERCEPTION_MODE_OBSTACLE_CORRECTION_GAIN",
-                        0.35,
-                    )
-                ),
-                0.0,
-                1.0,
-            )
-
-            escape = (
-                result.safety.escape_direction
-            )
-
-            if escape == "left":
-                steering -= obstacle_gain
-
-            elif escape == "right":
-                steering += obstacle_gain
-
-        # ----------------------------------------------------
-        # コーナー
-        # ----------------------------------------------------
-
-        if result.course.corner_detected:
-
-            corner_gain = clamp(
-                float(
-                    get_config(
-                        "PERCEPTION_MODE_CORNER_CORRECTION_GAIN",
-                        0.25,
-                    )
-                ),
-                0.0,
-                1.0,
-            )
-
-            if (
-                result.course.corner_direction
-                == "left"
-            ):
-                steering -= corner_gain
-
-            elif (
-                result.course.corner_direction
-                == "right"
-            ):
-                steering += corner_gain
-
-        # ----------------------------------------------------
-        # カメラ方向
-        # ----------------------------------------------------
-
-        camera_direction = (
-            safe_float(
-                result.camera_raw.get(
-                    "direction",
-                    0.0,
-                ),
-                0.0,
-            )
-        )
-
-        camera_confidence = clamp(
-            safe_float(
-                result.camera_raw.get(
-                    "direction_confidence",
-                    result.camera_raw.get(
-                        "confidence",
-                        0.0,
-                    ),
-                ),
-                0.0,
-            ),
-            0.0,
-            1.0,
-        )
-
-        camera_gain = clamp(
-            float(
-                get_config(
-                    "PERCEPTION_MODE_CAMERA_CORRECTION_GAIN",
-                    0.20,
-                )
-            ),
-            0.0,
-            1.0,
-        )
-
-        if camera_confidence > 0.0:
-
-            steering += (
-                camera_direction
-                * camera_confidence
-                * camera_gain
-            )
-
-        # ----------------------------------------------------
-        # モード固有の補正
-        # ----------------------------------------------------
-
-        if (
-            mode_name
-            in (
-                "racer",
-                "gap_follow",
-                "follow_the_gap",
-            )
-        ):
-
-            high_speed_gain = clamp(
-                float(
-                    get_config(
-                        "PERCEPTION_HIGH_SPEED_CORRECTION_GAIN",
-                        0.15,
-                    )
-                ),
-                0.0,
-                1.0,
-            )
-
-            steering += (
-                result.course.direction
-                * high_speed_gain
-            )
-
-        elif (
-            mode_name
-            in (
-                "wall_follow",
-                "wall_follow_pid",
-            )
-        ):
-
-            wall_gain = clamp(
-                float(
-                    get_config(
-                        "PERCEPTION_WALL_CORRECTION_GAIN",
-                        0.15,
-                    )
-                ),
-                0.0,
-                1.0,
-            )
-
-            steering += (
-                result.course.center_offset
-                * wall_gain
-            )
-
-        elif mode_name == "center_follow_pid":
-
-            center_gain = clamp(
-                float(
-                    get_config(
-                        "PERCEPTION_CENTER_CORRECTION_GAIN",
-                        0.20,
-                    )
-                ),
-                0.0,
-                1.0,
-            )
-
-            steering += (
-                result.course.center_offset
-                * center_gain
-            )
-
-        # ----------------------------------------------------
-        # 緊急停止時には操舵を中央へ
-        # ----------------------------------------------------
-
-        if result.safety.must_stop:
-            steering = 0.0
-
-        return clamp(
-            steering,
-            -1.0,
-            1.0,
-        )
-
-    # ========================================================
-    # 走行モード向け速度補正
-    # ========================================================
-
-    def apply_speed_correction(
-        self,
-        base_throttle: float,
-        mode: str,
-        result: Optional[PerceptionResult] = None,
-    ) -> float:
-        """
-        既存の走行方式の速度に
-        perceptionの安全情報を追加する。
-        """
-
-        if result is None:
-            result = self.result
-
-        throttle = clamp(
-            safe_float(
-                base_throttle,
-                0.0,
-            ),
-            0.0,
-            1.0,
-        )
-
-        mode_name = str(
-            mode
-            if mode is not None
-            else ""
-        ).lower()
-
-        # ----------------------------------------------------
-        # 緊急停止
-        # ----------------------------------------------------
-
-        if result.safety.must_stop:
-            return 0.0
-
-        # ----------------------------------------------------
-        # 危険度
-        # ----------------------------------------------------
-
-        danger_gain = clamp(
-            float(
-                get_config(
-                    "PERCEPTION_MODE_DANGER_SPEED_GAIN",
-                    0.50,
-                )
-            ),
-            0.0,
-            1.0,
-        )
-
-        throttle *= (
-            1.0
-            -
-            result.safety.danger_level
-            * danger_gain
-        )
-
-        # ----------------------------------------------------
-        # コーナー
-        # ----------------------------------------------------
-
-        if result.course.corner_detected:
-
-            corner_factor = clamp(
-                float(
-                    get_config(
-                        "PERCEPTION_MODE_CORNER_SPEED_FACTOR",
-                        0.70,
-                    )
-                ),
-                0.0,
-                1.0,
-            )
-
-            throttle *= (
-                corner_factor
-            )
-
-        # ----------------------------------------------------
-        # 障害物
-        # ----------------------------------------------------
-
-        if result.obstacle.detected:
-
-            obstacle_factor = clamp(
-                float(
-                    get_config(
-                        "PERCEPTION_MODE_OBSTACLE_SPEED_FACTOR",
-                        0.55,
-                    )
-                ),
-                0.0,
-                1.0,
-            )
-
-            throttle *= (
-                obstacle_factor
-            )
-
-        # ----------------------------------------------------
-        # 高速モードは前方が開いているときだけ許可
-        # ----------------------------------------------------
-
-        if (
-            mode_name
-            in (
-                "racer",
-                "gap_follow",
-                "follow_the_gap",
-            )
-        ):
-
-            front = safe_float(
-                result.wall.front_distance,
-                self.default_distance,
-            )
-
-            high_speed_distance = float(
-                get_config(
-                    "PERCEPTION_HIGH_SPEED_DISTANCE",
-                    1000.0,
-                )
-            )
-
-            if (
-                front
-                < high_speed_distance
-            ):
-                throttle *= 0.70
-
-        # ----------------------------------------------------
-        # 行き止まり
-        # ----------------------------------------------------
-
-        if result.course.dead_end:
-
-            throttle = min(
-                throttle,
-                float(
-                    get_config(
-                        "PERCEPTION_DEAD_END_THROTTLE",
-                        0.20,
-                    )
-                ),
-            )
-
-        # ----------------------------------------------------
-        # 最終値
-        # ----------------------------------------------------
-
-        return clamp(
-            throttle,
-            0.0,
-            1.0,
-        )
-
-    # ========================================================
-    # 既存Plannerとの接続用
-    # ========================================================
-
-    def get_planner_input(
-        self,
-        mode: Optional[str] = None,
-        base_steering: Optional[float] = None,
-        base_throttle: Optional[float] = None,
-    ) -> Dict[str, Any]:
-        """
-        planner.pyから呼びやすい
-        共通インターフェース。
-
-        例:
-
-            planner_input = perception.get_planner_input(
-                mode="wall_follow",
-                base_steering=steering,
-                base_throttle=throttle,
-            )
-
-        """
-
-        result = self.result
-
-        # ----------------------------------------------------
-        # ベース値
-        # ----------------------------------------------------
-
-        if base_steering is None:
-            steering = (
-                result.recommendation.steering
-            )
-        else:
-            steering = (
-                safe_float(
-                    base_steering,
-                    result.recommendation.steering,
-                )
-            )
-
-        if base_throttle is None:
-            throttle = (
-                result.recommendation.throttle
-            )
-        else:
-            throttle = (
-                safe_float(
-                    base_throttle,
-                    result.recommendation.throttle,
-                )
-            )
-
-        # ----------------------------------------------------
-        # モード補正
-        # ----------------------------------------------------
-
-        if mode is not None:
-
-            steering = (
-                self.apply_mode_correction(
-                    base_steering=steering,
-                    mode=mode,
-                    result=result,
-                )
-            )
-
-            throttle = (
-                self.apply_speed_correction(
-                    base_throttle=throttle,
-                    mode=mode,
-                    result=result,
-                )
-            )
-
-        # ----------------------------------------------------
-        # 最終結果
-        # ----------------------------------------------------
-
-        return {
-            "steering":
-                clamp(
-                    steering,
-                    -1.0,
-                    1.0,
-                ),
-
-            "throttle":
-                clamp(
-                    throttle,
-                    0.0,
-                    1.0,
-                ),
-
-            "direction":
-                result.course.direction,
-
-            "center_offset":
-                result.course.center_offset,
-
-            "danger_level":
-                result.safety.danger_level,
-
-            "obstacle":
-                result.obstacle.detected,
-
-            "corner":
-                result.course.corner_direction,
-
-            "dead_end":
-                result.course.dead_end,
-
-            "escape_direction":
-                result.safety.escape_direction,
-
-            "confidence":
-                result.recommendation.confidence,
-
-            "reason":
-                result.recommendation.reason,
-        }
-
-    # ========================================================
-    # 完全リセット
-    # ========================================================
-
-    def full_reset(self) -> None:
-        """
-        perception内部のすべての履歴をリセットする。
-        """
-
-        self.reset()
-
-        if hasattr(
-            self,
-            "_direction_history",
-        ):
-            self._direction_history.clear()
-
-        logger.info(
-            "Perception full reset"
-        )
-
-    # ========================================================
-    # 簡易ステータス
-    # ========================================================
-
-    def get_status(self) -> Dict[str, Any]:
-        """
-        システムの状態を返す。
-        """
 
         return {
             "initialized":
@@ -5056,88 +3703,106 @@ class Perception:
             "frame_count":
                 self.frame_count,
 
-            "history_size":
-                self.history_size,
-
-            "last_update":
-                self.last_update_time,
-
-            "camera_enabled":
+            "camera_active":
                 bool(
                     self.result.camera_raw
                 ),
 
-            "lidar_enabled":
+            "lidar_active":
                 bool(
                     self.result.lidar_raw
                 ),
 
-            "yolo_enabled":
+            "yolo_active":
                 bool(
                     self.result.vision_raw
                 ),
 
             "emergency":
                 self.result.safety.emergency,
-
-            "danger_level":
-                self.result.safety.danger_level,
         }
+
+    # ========================================================
+    # Reset
+    # ========================================================
+
+    def reset(
+        self,
+    ) -> None:
+
+        self.result = (
+            PerceptionResult()
+        )
+
+        self.frame_count = 0
+
+        self.initialized = False
+
+        self.last_update_time = (
+            time.perf_counter()
+        )
+
+        self._left_distance_history.clear()
+        self._front_distance_history.clear()
+        self._right_distance_history.clear()
+        self._direction_history.clear()
+
+        logger.info(
+            "Perception reset"
+        )
+
+    def full_reset(
+        self,
+    ) -> None:
+        self.reset()
 
 
 # ============================================================
-# 外部から扱いやすくするエイリアス
+# Alias
 # ============================================================
 
 PerceptionEngine = Perception
 
 
 # ============================================================
-# 簡易テスト
+# オフラインテスト
 # ============================================================
-
-def create_test_perception() -> Perception:
-    """
-    実車センサーなしでPerceptionだけをテストするための関数。
-    """
-
-    return Perception()
-
 
 def test_perception() -> None:
     """
-    perception.py単体テスト。
-
-    実際のカメラや超音波を使用せず、
-    ダミーデータで認識処理が動作するか確認する。
+    実車なしで perception.py のロジックを確認する。
 
     実行:
         python perception.py
     """
 
-    print("=" * 60)
-    print("Perception test")
-    print("=" * 60)
+    print("=" * 70)
+    print("PERCEPTION TEST")
+    print("=" * 70)
 
     perception = Perception()
 
-    ultrasonic_data = {
-        "FrLH": 450,
+    # ----------------------------------------
+    # ケース1: 左右に壁、前方は十分空いている
+    # ----------------------------------------
+
+    ultrasonic = {
+        "FrLH": 180,
         "FrFR": 900,
-        "FrRH": 300,
+        "FrRH": 350,
     }
 
-    camera_data = {
+    camera = {
         "left_wall": True,
         "right_wall": True,
         "front_wall": False,
 
         "left_confidence": 0.90,
-        "right_confidence": 0.85,
+        "right_confidence": 0.80,
         "front_confidence": 0.20,
 
         "direction": "right",
-        "direction_confidence": 0.80,
+        "direction_confidence": 0.75,
 
         "corner": None,
         "corner_confidence": 0.0,
@@ -5146,93 +3811,76 @@ def test_perception() -> None:
         "obstacle_confidence": 0.0,
     }
 
-    yolo_data = {
-        "detections": []
+    result = perception.update_normalized(
+        ultrasonic_data=ultrasonic,
+        camera_data=camera,
+        lidar_data=None,
+        yolo_data=None,
+    )
+
+    print()
+    print("【CASE 1】")
+    print(
+        perception.get_debug_summary()
+    )
+
+    # ----------------------------------------
+    # ケース2: 前方が危険
+    # ----------------------------------------
+
+    ultrasonic = {
+        "FrLH": 300,
+        "FrFR": 200,
+        "FrRH": 500,
+    }
+
+    camera = {
+        "left_wall": True,
+        "right_wall": True,
+        "front_wall": True,
+
+        "left_confidence": 0.80,
+        "right_confidence": 0.80,
+        "front_confidence": 0.95,
+
+        "direction": "left",
+        "direction_confidence": 0.85,
+
+        "corner": "left",
+        "corner_confidence": 0.90,
+
+        "obstacle": True,
+        "obstacle_confidence": 0.95,
+        "obstacle_side": "left",
     }
 
     result = perception.update_normalized(
-        ultrasonic_data=ultrasonic_data,
-        camera_data=camera_data,
-        lidar_data={},
-        yolo_data=yolo_data,
+        ultrasonic_data=ultrasonic,
+        camera_data=camera,
+        lidar_data=None,
+        yolo_data=None,
     )
 
     print()
-    print("=== WALL ===")
+    print("【CASE 2】")
     print(
-        f"LEFT  : {result.wall.left_distance}"
-    )
-    print(
-        f"FRONT : {result.wall.front_distance}"
-    )
-    print(
-        f"RIGHT : {result.wall.right_distance}"
+        perception.get_debug_summary()
     )
 
-    print()
-    print("=== COURSE ===")
-    print(
-        f"DIRECTION : {result.course.direction:.3f}"
-    )
-    print(
-        f"CENTER    : {result.course.center_offset:.3f}"
-    )
-    print(
-        f"WIDTH     : {result.course.estimated_width:.1f}"
-    )
-    print(
-        f"CORNER    : {result.course.corner_direction}"
-    )
-    print(
-        f"DEAD END  : {result.course.dead_end}"
-    )
-    print(
-        f"INTERSECT : {result.course.intersection}"
-    )
-
-    print()
-    print("=== SAFETY ===")
-    print(
-        f"DANGER    : {result.safety.danger_level:.3f}"
-    )
-    print(
-        f"COLLISION : {result.safety.collision_risk:.3f}"
-    )
-    print(
-        f"STOP      : {result.safety.must_stop}"
-    )
-    print(
-        f"SLOW      : {result.safety.must_slow_down}"
-    )
-    print(
-        f"ESCAPE    : {result.safety.escape_direction}"
-    )
-
-    print()
-    print("=== RECOMMENDATION ===")
-    print(
-        f"STEERING  : {result.recommendation.steering:.3f}"
-    )
-    print(
-        f"THROTTLE  : {result.recommendation.throttle:.3f}"
-    )
-    print(
-        f"CONFIDENCE: {result.recommendation.confidence:.3f}"
-    )
-    print(
-        f"REASON    : {result.recommendation.reason}"
-    )
-
-    print()
-    print("=== PLANNER INPUT ===")
+    # ----------------------------------------
+    # Planner入力
+    # ----------------------------------------
 
     planner_input = (
         perception.get_planner_input(
-            mode="wall_follow",
+            mode="racer",
             base_steering=0.0,
-            base_throttle=0.70,
+            base_throttle=0.8,
         )
     )
+
+    print()
+    print("【PLANNER INPUT】")
 
     for key, value in planner_input.items():
         print(
@@ -5240,23 +3888,13 @@ def test_perception() -> None:
         )
 
     print()
-    print("=== STATUS ===")
-
-    status = perception.get_status()
-
-    for key, value in status.items():
-        print(
-            f"{key}: {value}"
-        )
-
-    print()
-    print("=" * 60)
-    print("Perception test completed")
-    print("=" * 60)
+    print("=" * 70)
+    print("TEST COMPLETE")
+    print("=" * 70)
 
 
 # ============================================================
-# メイン
+# Main
 # ============================================================
 
 if __name__ == "__main__":
