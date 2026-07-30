@@ -3,6 +3,10 @@
 # #必要に応じてコメントアウトを外して使用してください。
 # # coding:utf-8
 # # machine type: m1-12 for hanson
+PERCEPTION_ENABLED = True
+PERCEPTION_APPLY_CORRECTION = True
+PERCEPTION_INPUT_IMAGE = "cam0"
+PERCEPTION_DEBUG = True
 # # device: Raspberry Pi 4B, ydlidar tfmini plus, Raspberry Pi Camera Module V3
 
 # # 使用するセンサー
